@@ -8,7 +8,7 @@ import webbrowser
 import re
 
 # 🔐 인증 및 시트 주소
-CREDENTIALS_FILE = 'numeric-haven-455700-k8-7e15ff3d6313.json'
+CREDENTIALS_FILE = 'numeric-haven-455700-k8-ce44177240c2.json'
 SPREADSHEET_URL = 'https://docs.google.com/spreadsheets/d/17qWvyVONniRI758kESiYS680ChnF7RFHAX-iP-FbrVI/edit'
 
 def run_script():
@@ -80,7 +80,7 @@ def run_script():
 
 
 def open_log_sheet():
-    webbrowser.open(SPREADSHEET_URL + "#gid=1370173144")  # Log 시트 gid에 맞게 수정
+    webbrowser.open(SPREADSHEET_URL + "#gid=1347292722")  # Log 시트 gid에 맞게 수정
 
 
 # 🖥️ GUI 구성
