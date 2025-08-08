@@ -303,8 +303,16 @@ root.title("EVER-GROWTH 자동화 도구")
 root.geometry("360x340")
 
 Button(root, text="코웨이 진행상황 업데이트",   command=run_script,                      width=34, height=2, bg="lightgreen").pack(pady=8)
-Button(root, text="코웨이 설치일 자동입력 (C열)", command=run_install_date_updater,      width=34, height=2, bg="lightyellow").pack(pady=8)
-Button(root, text="청호 설치확정일·월 입력 (C/Y)", command=run_chungho_install_date_updater, width=34, height=2, bg="khaki").pack(pady=8)
+Button(root, text="코웨이 설치일 입력", command=run_install_date_updater,      width=34, height=2, bg="lightyellow").pack(pady=8)
+Button(root, text="청호 설치일 입력", command=run_chungho_install_date_updater, width=34, height=2, bg="khaki").pack(pady=8)
 Button(root, text="수정 로그 확인",             command=open_log_sheet,                 width=34, height=2, bg="lightblue").pack(pady=8)
 
 root.mainloop()
+# >> Exe 파일 만드는 터미널 명령어 pip install gspread-formatting
+# >> github에 업로드(업데이트) 명령어(3줄로작성) 
+#   하기전에 터미널에 커밋
+#   git config --global user.name "evergrowthoa"
+#   git config --global user.email "evergtrowthoa@gmail.com"
+#       git add .
+#       git commit -m "변경사항 설명"
+#       git push origin main
