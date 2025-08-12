@@ -9,6 +9,7 @@ import re
 import os
 import sys
 from gspread_formatting import CellFormat, Color, format_cell_range
+from gspread.exceptions import WorksheetNotFound
 
 # -------------------------------
 # 공통: PyInstaller/로컬 경로 헬퍼
@@ -28,6 +29,31 @@ SPREADSHEET_URL = 'https://docs.google.com/spreadsheets/d/17qWvyVONniRI758kESiYS
 
 # 포맷
 yellow_fill = CellFormat(backgroundColor=Color(1, 1, 0))
+
+# -------------------------------
+# 공용: 로그 유틸
+# -------------------------------
+def get_or_create_log(sheet):
+    """
+    'Log' 시트가 없으면 생성하고, 있으면 반환.
+    """
+    try:
+        return sheet.worksheet("Log")
+    except WorksheetNotFound:
+        ws = sheet.add_worksheet(title="Log", rows=1000, cols=10)
+        # 헤더 추가 (선택)
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ws.append_row(["timestamp", "customer_name", "v_value", "content", "note"])
+        # 생성 기록 남기기
+        ws.append_row([now_str, "-", "-", "Log sheet auto-created", "-"])
+        return ws
+
+def append_log(ws_log, customer_name, v_value, content, note=""):
+    """
+    Log 시트에 한 줄 추가.
+    """
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ws_log.append_row([now_str, str(customer_name or ""), str(v_value or ""), str(content or ""), str(note or "")])
 
 # -------------------------------
 # 유틸: 헤더 문제 우회용 로더(청호용에서 사용)
@@ -68,7 +94,7 @@ def run_script():
         sheet = client.open_by_url(SPREADSHEET_URL)
         ws1 = sheet.get_worksheet(0)
         ws2 = sheet.get_worksheet(1)
-        ws_log = sheet.worksheet("Log")
+        ws_log = get_or_create_log(sheet)
 
         df1 = pd.DataFrame(ws1.get_all_records())
         df2 = pd.DataFrame(ws2.get_all_records())
@@ -88,10 +114,6 @@ def run_script():
             (df1["비가망유형"].astype(str).str.strip() != "")
         )
 
-        def write_log(customer_name, v_value, content, note=""):
-            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            ws_log.append_row([now_str, customer_name, v_value, content, note])
-
         updated_count = 0
         for idx, row1 in df1[condition].iterrows():
             v_value = str(row1["비가망유형"]).strip()
@@ -99,7 +121,7 @@ def run_script():
             f_value = str(row1.get("고객명", "")).strip()
 
             if not v_last4:
-                write_log(f_value, v_value, "⛔ 비가망유형에 숫자 없음")
+                append_log(ws_log, f_value, v_value, "⛔ 비가망유형에 숫자 없음")
                 continue
 
             for _, row2 in df2.iterrows():
@@ -113,12 +135,12 @@ def run_script():
                         try:
                             parsed_date = parse(raw_date)
                             l_val = parsed_date.strftime("%m-%d")
-                        except:
+                        except Exception:
                             l_val = raw_date
 
                         m_val = str(row2.get("배정시간", "")).strip()
                         existing_note = str(row1.get("특이사항", "")).strip()
-                        new_note = f"{l_val} {m_val}"
+                        new_note = f"{l_val} {m_val}".strip()
                         combined_note = f"{new_note} | {existing_note}" if existing_note else new_note
 
                         # 값 쓰기
@@ -132,11 +154,11 @@ def run_script():
                         except Exception:
                             pass
 
-                        write_log(f_value, v_value, "진행상황 → 승인완료, 특이사항 업데이트", combined_note)
+                        append_log(ws_log, f_value, v_value, "진행상황 → 승인완료, 특이사항 업데이트", combined_note)
                         updated_count += 1
                         break
                     else:
-                        write_log(f_value, v_value, f"⛔ 상태 불일치: {상태값}")
+                        append_log(ws_log, f_value, v_value, f"⛔ 상태 불일치: {상태값}")
                         break
 
         messagebox.showinfo("완료", f"진행상황 업데이트 완료!\n총 {updated_count}건 변경됨 ✅")
@@ -195,7 +217,7 @@ def run_install_date_updater():
                         except Exception:
                             pass
                         updated += 1
-                    except:
+                    except Exception:
                         pass
                     break
 
@@ -206,7 +228,7 @@ def run_install_date_updater():
 
 # -------------------------------
 # 3) 청호 설치확정일·월 입력 (C열=YY-MM-DD, Y열=MM)
-#    헤더 중복/빈칸 대응 + 공백 제거 비교 + 하이라이트 보장
+#    헤더 중복/빈칸 대응 + 공백 제거 비교 + 하이라이트 보장 + 로깅 추가
 # -------------------------------
 def run_chungho_install_date_updater():
     try:
@@ -217,6 +239,7 @@ def run_chungho_install_date_updater():
         sheet = client.open_by_url(SPREADSHEET_URL)
         ws1 = sheet.get_worksheet(0)      # 시트1
         ws3 = sheet.get_worksheet(2)      # 시트3
+        ws_log = get_or_create_log(sheet) # ✅ 로그 시트 확보
 
         df1 = worksheet_to_dataframe(ws1) # 안전 로딩
         df3 = worksheet_to_dataframe(ws3)
@@ -250,39 +273,51 @@ def run_chungho_install_date_updater():
         updated_count = 0
 
         for idx1, row1 in df1[condition].iterrows():
-            v_value = str(row1.iloc[21]).strip()   # V열
+            v_value = str(row1.iloc[21]).strip()   # V열 (비가망유형/계약 관련 값)
             v_last4 = re.sub(r'\D', '', v_value)[-4:]
             f_value = str(row1.iloc[5]).strip()    # F열(고객명)
 
             if not v_last4:
+                append_log(ws_log, f_value, v_value, "⛔ 비가망유형에 숫자 없음")
                 continue
 
+            matched = False
             for _, row3 in df3.iterrows():
                 b_last4 = str(row3[col_contract])[-4:]
                 c_value_sheet3 = str(row3[col_customer]).strip()
                 n_value = str(row3[col_status]).strip()
                 m_value = str(row3[col_m_date]).strip()  # YYYY-MM-DD 기대
 
-                if (v_last4 == b_last4) and (f_value and f_value in c_value_sheet3) and (n_value == "매출확정"):
-                    try:
-                        dt = datetime.strptime(m_value, "%Y-%m-%d")
-                        formatted_c = dt.strftime("%y-%m-%d")  # C열(3)
-                        month_only  = dt.strftime("%m")         # Y열(25)
-
-                        ws1.update_cell(idx1 + 2, 3,  formatted_c)  # C
-                        ws1.update_cell(idx1 + 2, 25, month_only)   # Y
-
-                        # 값 썼으면 무조건 칠하기
+                if (v_last4 == b_last4) and (f_value and f_value in c_value_sheet3):
+                    matched = True
+                    if n_value == "매출확정":
                         try:
-                            format_cell_range(ws1, f"C{idx1+2}", yellow_fill)
-                            format_cell_range(ws1, f"Y{idx1+2}", yellow_fill)
-                        except Exception:
-                            pass
+                            dt = datetime.strptime(m_value, "%Y-%m-%d")
+                            formatted_c = dt.strftime("%y-%m-%d")  # C열(3)
+                            month_only  = dt.strftime("%m")         # Y열(25)
 
-                        updated_count += 1
-                    except Exception as e:
-                        print(f"날짜 변환 오류: {m_value} -> {e}")
-                    break
+                            ws1.update_cell(idx1 + 2, 3,  formatted_c)  # C
+                            ws1.update_cell(idx1 + 2, 25, month_only)   # Y
+
+                            # 값 썼으면 무조건 칠하기
+                            try:
+                                format_cell_range(ws1, f"C{idx1+2}", yellow_fill)
+                                format_cell_range(ws1, f"Y{idx1+2}", yellow_fill)
+                            except Exception:
+                                pass
+
+                            append_log(ws_log, f_value, v_value, "청호 C/Y 업데이트", f"C={formatted_c}, Y={month_only}")
+                            updated_count += 1
+                        except Exception as e:
+                            append_log(ws_log, f_value, v_value, "⛔ 날짜 변환 오류", f"raw={m_value}")
+                        break
+                    else:
+                        append_log(ws_log, f_value, v_value, f"⛔ 상태 불일치: {n_value}")
+                        break
+
+            # (선택) 매칭 자체가 안 된 경우를 남기고 싶다면 주석 해제
+            # if not matched:
+            #     append_log(ws_log, f_value, v_value, "정보 매칭 실패", "계약번호/고객명 매칭 없음")
 
         messagebox.showinfo("완료", f"청호: 총 {updated_count}건 변경 완료 ✅")
 
@@ -321,3 +356,6 @@ root.mainloop()
 #git add .
 #git commit -m "변경내용 설명"
 #git push origin main
+
+# EXE파일 만드는 bash
+# pyinstaller --onefile --noconsole --add-data "numeric-haven-455700-k8-541f203927de.json;." main.py
