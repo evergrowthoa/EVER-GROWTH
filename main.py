@@ -308,3 +308,16 @@ Button(root, text="청호 설치확정일·월 입력 (C/Y)", command=run_chungh
 Button(root, text="수정 로그 확인",             command=open_log_sheet,                 width=34, height=2, bg="lightblue").pack(pady=8)
 
 root.mainloop()
+
+
+# 한 번만 설정
+#git config --global user.name "본인 이름"
+#git config --global user.email "가입한 GitHub 이메일"
+
+# GitHub 저장소 연결 (최초 1번만)
+#git remote add origin https://github.com/계정명/저장소명.git
+
+# 이후 매번
+#git add .
+#git commit -m "변경내용 설명"
+#git push origin main
