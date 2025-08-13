@@ -10,6 +10,34 @@ import os
 import sys
 from gspread_formatting import CellFormat, Color, format_cell_range
 from gspread.exceptions import WorksheetNotFound
+import time
+from gspread.exceptions import APIError
+from gspread_formatting import format_cell_ranges  # 추가
+
+def _with_retry(fn, *args, **kwargs):
+    """429/503일 때 지수백오프로 자동 재시도."""
+    tries = kwargs.pop("_tries", 5)
+    for i in range(tries):
+        try:
+            return fn(*args, **kwargs)
+        except APIError as e:
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status in (429, 503) and i < tries - 1:
+                time.sleep(1.5 * (2 ** i))
+                continue
+            raise
+
+def batch_values_update(spreadsheet, data, value_input_option="RAW", chunk=400):
+    """
+    spreadsheets.values.batchUpdate를 사용해 값 쓰기를 묶어서 전송.
+    data: [{'range': '시트명!A1', 'values': [[...]]}, ...]
+    """
+    for i in range(0, len(data), chunk):
+        body = {
+            "valueInputOption": value_input_option,
+            "data": data[i:i+chunk],
+        }
+        _with_retry(spreadsheet.values_batch_update, body)
 
 # -------------------------------
 # 공통: PyInstaller/로컬 경로 헬퍼
@@ -239,20 +267,20 @@ def run_chungho_install_date_updater():
         sheet = client.open_by_url(SPREADSHEET_URL)
         ws1 = sheet.get_worksheet(0)      # 시트1
         ws3 = sheet.get_worksheet(2)      # 시트3
-        ws_log = get_or_create_log(sheet) # ✅ 로그 시트 확보
+        ws_log = get_or_create_log(sheet) # 로그 시트
 
-        df1 = worksheet_to_dataframe(ws1) # 안전 로딩
+        df1 = worksheet_to_dataframe(ws1)
         df3 = worksheet_to_dataframe(ws3)
 
         if df1.empty or df3.empty:
             messagebox.showinfo("알림", "시트 데이터가 비어있습니다.")
             return
 
-        # ✅ 공백 제거한 조건 (26~206행 스킵 방지)
+        # 공백 제거 조건(H='청호' & C='승인완료' & V not empty)
         condition = (
-            df1.iloc[:, 7].astype(str).str.strip().eq("청호") &        # H열
-            df1.iloc[:, 2].astype(str).str.strip().eq("승인완료") &    # C열
-            df1.iloc[:, 21].astype(str).str.strip().ne("")             # V열
+            df1.iloc[:, 7].astype(str).str.strip().eq("청호") &
+            df1.iloc[:, 2].astype(str).str.strip().eq("승인완료") &
+            df1.iloc[:, 21].astype(str).str.strip().ne("")
         )
 
         def pick_col(df, candidates):
@@ -270,59 +298,75 @@ def run_chungho_install_date_updater():
             messagebox.showerror("에러", "시트3 열을 찾지 못했습니다.")
             return
 
+        updates = []            # values.batchUpdate용 payload
+        fmt_ranges = []         # 포맷 일괄 지정용
+        log_rows = []           # 로그 한 번에 append_rows
         updated_count = 0
 
         for idx1, row1 in df1[condition].iterrows():
-            v_value = str(row1.iloc[21]).strip()   # V열 (비가망유형/계약 관련 값)
+            v_value = str(row1.iloc[21]).strip()     # V열
             v_last4 = re.sub(r'\D', '', v_value)[-4:]
-            f_value = str(row1.iloc[5]).strip()    # F열(고객명)
+            f_value = str(row1.iloc[5]).strip()      # F열(고객명)
+            rownum  = idx1 + 2                       # 시트 실제 행 번호
 
             if not v_last4:
-                append_log(ws_log, f_value, v_value, "⛔ 비가망유형에 숫자 없음")
+                log_rows.append([datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                  f_value, v_value, "⛔ 비가망유형에 숫자 없음", ""])
                 continue
 
-            matched = False
             for _, row3 in df3.iterrows():
                 b_last4 = str(row3[col_contract])[-4:]
-                c_value_sheet3 = str(row3[col_customer]).strip()
-                n_value = str(row3[col_status]).strip()
-                m_value = str(row3[col_m_date]).strip()  # YYYY-MM-DD 기대
+                c_name  = str(row3[col_customer]).strip()
+                n_val   = str(row3[col_status]).strip()
+                m_val   = str(row3[col_m_date]).strip()
 
-                if (v_last4 == b_last4) and (f_value and f_value in c_value_sheet3):
-                    matched = True
-                    if n_value == "매출확정":
+                if (v_last4 == b_last4) and f_value and (f_value in c_name):
+                    if n_val == "매출확정":
                         try:
-                            dt = datetime.strptime(m_value, "%Y-%m-%d")
-                            formatted_c = dt.strftime("%y-%m-%d")  # C열(3)
-                            month_only  = dt.strftime("%m")         # Y열(25)
+                            dt = datetime.strptime(m_val, "%Y-%m-%d")
+                            c_text = dt.strftime("%y-%m-%d")   # C열(YY-MM-DD)
+                            y_val  = str(dt.month)             # ✅ Y열(한 자리: 7)
 
-                            ws1.update_cell(idx1 + 2, 3,  formatted_c)  # C
-                            ws1.update_cell(idx1 + 2, 25, month_only)   # Y
+                            # 값은 배치 업데이트에 모으기
+                            updates.append({"range": f"{ws1.title}!C{rownum}:C{rownum}", "values": [[c_text]]})
+                            updates.append({"range": f"{ws1.title}!Y{rownum}:Y{rownum}", "values": [[y_val]]})
 
-                            # 값 썼으면 무조건 칠하기
-                            try:
-                                format_cell_range(ws1, f"C{idx1+2}", yellow_fill)
-                                format_cell_range(ws1, f"Y{idx1+2}", yellow_fill)
-                            except Exception:
-                                pass
+                            # 포맷은 배치로 모으기
+                            fmt_ranges.append((f"C{rownum}", yellow_fill))
+                            fmt_ranges.append((f"Y{rownum}", yellow_fill))
 
-                            append_log(ws_log, f_value, v_value, "청호 C/Y 업데이트", f"C={formatted_c}, Y={month_only}")
+                            # 로그도 한 번에
+                            log_rows.append([datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                             f_value, v_value, "청호 설치확정일 및 정산월 입력", f"설치확정일={c_text}, 정산월={y_val}"])
                             updated_count += 1
-                        except Exception as e:
-                            append_log(ws_log, f_value, v_value, "⛔ 날짜 변환 오류", f"raw={m_value}")
+                        except Exception:
+                            log_rows.append([datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                             f_value, v_value, "⛔ 날짜 변환 오류", f"raw={m_val}"])
                         break
                     else:
-                        append_log(ws_log, f_value, v_value, f"⛔ 상태 불일치: {n_value}")
+                        log_rows.append([datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                         f_value, v_value, f"⛔ 상태 불일치: {n_val}", ""])
                         break
 
-            # (선택) 매칭 자체가 안 된 경우를 남기고 싶다면 주석 해제
-            # if not matched:
-            #     append_log(ws_log, f_value, v_value, "정보 매칭 실패", "계약번호/고객명 매칭 없음")
+        # 실제 쓰기 호출
+        if updates:
+            batch_values_update(sheet, updates, value_input_option="RAW", chunk=400)
+        if fmt_ranges:
+            _with_retry(format_cell_ranges, ws1, fmt_ranges)
+        if log_rows:
+            try:
+                _with_retry(ws_log.append_rows, log_rows, value_input_option="RAW")
+            except AttributeError:
+                _with_retry(sheet.values_append,
+                            'Log!A1',
+                            {'valueInputOption': 'RAW', 'insertDataOption': 'INSERT_ROWS'},
+                            {'values': log_rows})
 
         messagebox.showinfo("완료", f"청호: 총 {updated_count}건 변경 완료 ✅")
 
     except Exception as e:
         messagebox.showerror("에러 발생", str(e))
+
 
 # -------------------------------
 # 4) 로그 시트 열기
@@ -338,8 +382,8 @@ root.title("EVER-GROWTH 자동화 도구")
 root.geometry("360x340")
 
 Button(root, text="코웨이 진행상황 업데이트",   command=run_script,                      width=34, height=2, bg="lightgreen").pack(pady=8)
-Button(root, text="코웨이 설치일 자동입력 (C열)", command=run_install_date_updater,      width=34, height=2, bg="lightyellow").pack(pady=8)
-Button(root, text="청호 설치확정일·월 입력 (C/Y)", command=run_chungho_install_date_updater, width=34, height=2, bg="khaki").pack(pady=8)
+Button(root, text="코웨이 설치확정일 자동입력", command=run_install_date_updater,      width=34, height=2, bg="lightyellow").pack(pady=8)
+Button(root, text="청호 설치확정일·정산월 입력 ", command=run_chungho_install_date_updater, width=34, height=2, bg="khaki").pack(pady=8)
 Button(root, text="수정 로그 확인",             command=open_log_sheet,                 width=34, height=2, bg="lightblue").pack(pady=8)
 
 root.mainloop()
