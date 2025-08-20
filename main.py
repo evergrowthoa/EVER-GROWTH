@@ -356,16 +356,17 @@ def open_log_sheet():
 # -------------------------------
 # GUI
 # -------------------------------
-root = Tk()
-root.title("EVER-GROWTH 자동화 도구")
-root.geometry("360x340")
+if __name__ == "__main__":
+    root = Tk()
+    root.title("EVER-GROWTH 자동화 도구")
+    root.geometry("360x340")
 
-Button(root, text="코웨이 진행상황 업데이트",   command=run_script,                      width=34, height=2, bg="lightgreen").pack(pady=8)
-Button(root, text="코웨이 설치확정일 자동입력", command=run_install_date_updater,      width=34, height=2, bg="lightyellow").pack(pady=8)
-Button(root, text="청호 설치확정일·정산월 입력 ", command=run_chungho_install_date_updater, width=34, height=2, bg="khaki").pack(pady=8)
-Button(root, text="수정 로그 확인",             command=open_log_sheet,                 width=34, height=2, bg="lightblue").pack(pady=8)
+    Button(root, text="코웨이 진행상황 업데이트",   command=run_script,                      width=34, height=2, bg="lightgreen").pack(pady=8)
+    Button(root, text="코웨이 설치확정일 자동입력", command=run_install_date_updater,      width=34, height=2, bg="lightyellow").pack(pady=8)
+    Button(root, text="청호 설치확정일·정산월 입력 ", command=run_chungho_install_date_updater, width=34, height=2, bg="khaki").pack(pady=8)
+    Button(root, text="수정 로그 확인",             command=open_log_sheet,                 width=34, height=2, bg="lightblue").pack(pady=8)
 
-
+    root.mainloop()
 
 # 한 번만 설정
 #git config --global user.name "본인 이름"
