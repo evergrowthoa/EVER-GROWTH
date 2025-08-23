@@ -347,6 +347,103 @@ def run_chungho_install_date_updater():
     except Exception as e:
         messagebox.showerror("에러 발생", str(e))
 
+def run_script_cheongho():
+    try:
+        # ==========================
+        # 시트 불러오기
+        # ==========================
+        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+        creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
+        client = gspread.authorize(creds)
+
+        sheet = client.open_by_url(SPREADSHEET_URL)
+        ws1 = sheet.get_worksheet(0)
+        ws3 = sheet.get_worksheet(2)
+        ws_log = get_or_create_log(sheet)
+
+        df1 = pd.DataFrame(ws1.get_all_records())
+        df3 = pd.DataFrame(ws3.get_all_records())
+
+        updated_rows = []
+
+        # ==========================
+        # 조건 ① 브랜드, 진행상황, 계약번호
+        # ==========================
+        condition = (
+            (df1["브랜드"] == "청호") &
+            (df1["진행상황"].isin(["계약서", "해피콜", "대기"])) &
+            (df1["계약번호"].astype(str).str.strip() != "")
+        )
+
+        # ==========================
+        # 조건에 맞는 행만 반복
+        # ==========================
+        for idx, row in df1[condition].iterrows():
+            계약번호 = str(row["계약번호"]).strip()
+            고객명 = str(row["고객명"]).strip()
+
+            if 계약번호 == "" or 고객명 == "":
+                continue
+
+            계약번호_뒤4 = 계약번호[-4:]
+
+            # ==========================
+            # ws3에서 매칭되는 행 찾기
+            # ==========================
+            match_df = df3[
+                (df3["계약번호"].astype(str).str[-4:] == 계약번호_뒤4) &
+                (df3["고객명"].astype(str).str.contains(고객명, na=False))
+            ]
+
+            if not match_df.empty:
+                for _, match_row in match_df.iterrows():
+                    진행상태 = str(match_row.get("진행상태", "")).strip()
+                    특이_L값 = str(match_row.get("L", "")).strip()  # ws3의 L열 값
+
+                    # ==========================
+                    # 조건 ② 진행상태가 출고의뢰/출고확정
+                    # ==========================
+                    if 진행상태 in ["출고의뢰", "출고확정"]:
+                        try:
+                            # L열 값을 날짜형식(yy-mm-dd)로 변환
+                            특이일자 = pd.to_datetime(특이_L값, errors="coerce")
+                            if pd.notna(특이일자):
+                                특이일자_str = 특이일자.strftime("%y-%m-%d")
+                            else:
+                                특이일자_str = 특이_L값
+                        except Exception:
+                            특이일자_str = 특이_L값
+
+                        # 기존 특이사항 앞부분에 추가
+                        기존특이 = str(row.get("특이사항", "")).strip()
+                        새로운특이 = f"{특이일자_str} {기존특이}".strip()
+
+                        # ==========================
+                        # df1 업데이트
+                        # ==========================
+                        df1.at[idx, "진행상황"] = "승인완료"
+                        df1.at[idx, "특이사항"] = 새로운특이
+
+                        updated_rows.append([
+                            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            row["고객명"], 계약번호,
+                            f"승인완료 / 특이사항: {새로운특이}"
+                        ])
+
+        # ==========================
+        # 시트 반영
+        # ==========================
+        ws1.update([df1.columns.values.tolist()] + df1.values.tolist())
+
+        if updated_rows:
+            log_ws.append_rows(updated_rows)
+
+        messagebox.showinfo("완료", f"청호 진행상황 업데이트 완료!\n총 {len(updated_rows)}건 변경됨")
+
+    except Exception as e:
+        messagebox.showerror("오류 발생", str(e))
+
+
 # -------------------------------
 # 4) 로그 시트 열기
 # -------------------------------
@@ -363,6 +460,7 @@ if __name__ == "__main__":
 
     Button(root, text="코웨이 진행상황 업데이트",   command=run_script,                      width=34, height=2, bg="lightgreen").pack(pady=8)
     Button(root, text="코웨이 설치확정일 자동입력", command=run_install_date_updater,      width=34, height=2, bg="lightyellow").pack(pady=8)
+    Button(root, text="청호 진행상황 업데이트", command=run_script_cheongho,      width=34, height=2, bg="orange").pack(pady=8)
     Button(root, text="청호 설치확정일·정산월 입력 ", command=run_chungho_install_date_updater, width=34, height=2, bg="khaki").pack(pady=8)
     Button(root, text="수정 로그 확인",             command=open_log_sheet,                 width=34, height=2, bg="lightblue").pack(pady=8)
 
