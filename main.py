@@ -347,6 +347,9 @@ def run_chungho_install_date_updater():
     except Exception as e:
         messagebox.showerror("에러 발생", str(e))
 
+# -------------------------------
+# 청호 진행상황 업데이트
+# -------------------------------
 def run_script_cheongho():
     try:
         # ==========================
@@ -361,8 +364,9 @@ def run_script_cheongho():
         ws3 = sheet.get_worksheet(2)
         ws_log = get_or_create_log(sheet)
 
-        df1 = pd.DataFrame(ws1.get_all_records())
-        df3 = pd.DataFrame(ws3.get_all_records())
+        # ✅ get_all_records() → worksheet_to_dataframe() 사용
+        df1 = worksheet_to_dataframe(ws1)
+        df3 = worksheet_to_dataframe(ws3)
 
         updated_rows = []
 
@@ -375,21 +379,14 @@ def run_script_cheongho():
             (df1["계약번호"].astype(str).str.strip() != "")
         )
 
-        # ==========================
-        # 조건에 맞는 행만 반복
-        # ==========================
         for idx, row in df1[condition].iterrows():
             계약번호 = str(row["계약번호"]).strip()
             고객명 = str(row["고객명"]).strip()
-
             if 계약번호 == "" or 고객명 == "":
                 continue
 
             계약번호_뒤4 = 계약번호[-4:]
 
-            # ==========================
-            # ws3에서 매칭되는 행 찾기
-            # ==========================
             match_df = df3[
                 (df3["계약번호"].astype(str).str[-4:] == 계약번호_뒤4) &
                 (df3["고객명"].astype(str).str.contains(고객명, na=False))
@@ -398,29 +395,18 @@ def run_script_cheongho():
             if not match_df.empty:
                 for _, match_row in match_df.iterrows():
                     진행상태 = str(match_row.get("진행상태", "")).strip()
-                    특이_L값 = str(match_row.get("L", "")).strip()  # ws3의 L열 값
+                    특이_L값 = str(match_row.get("L", "")).strip()  # ws3의 L열 값 (실제 이름 확인 필요!)
 
-                    # ==========================
-                    # 조건 ② 진행상태가 출고의뢰/출고확정
-                    # ==========================
                     if 진행상태 in ["출고의뢰", "출고확정"]:
                         try:
-                            # L열 값을 날짜형식(yy-mm-dd)로 변환
                             특이일자 = pd.to_datetime(특이_L값, errors="coerce")
-                            if pd.notna(특이일자):
-                                특이일자_str = 특이일자.strftime("%y-%m-%d")
-                            else:
-                                특이일자_str = 특이_L값
+                            특이일자_str = 특이일자.strftime("%y-%m-%d") if pd.notna(특이일자) else 특이_L값
                         except Exception:
                             특이일자_str = 특이_L값
 
-                        # 기존 특이사항 앞부분에 추가
                         기존특이 = str(row.get("특이사항", "")).strip()
                         새로운특이 = f"{특이일자_str} {기존특이}".strip()
 
-                        # ==========================
-                        # df1 업데이트
-                        # ==========================
                         df1.at[idx, "진행상황"] = "승인완료"
                         df1.at[idx, "특이사항"] = 새로운특이
 
@@ -436,12 +422,13 @@ def run_script_cheongho():
         ws1.update([df1.columns.values.tolist()] + df1.values.tolist())
 
         if updated_rows:
-            log_ws.append_rows(updated_rows)
+            ws_log.append_rows(updated_rows)  # ✅ log_ws → ws_log
 
         messagebox.showinfo("완료", f"청호 진행상황 업데이트 완료!\n총 {len(updated_rows)}건 변경됨")
 
     except Exception as e:
         messagebox.showerror("오류 발생", str(e))
+
 
 
 # -------------------------------
@@ -477,6 +464,11 @@ if __name__ == "__main__":
 #git add .
 #git commit -m "변경내용 설명"
 #git push origin main
+
+
+# github 지금 거 날리고 최신본만 가져오는것
+# git reset --hard HEAD
+# git pull origin main
 
 # EXE파일 만드는 bash
 # pyinstaller --onefile --noconsole --add-data "numeric-haven-455700-k8-541f203927de.json;." main.py
