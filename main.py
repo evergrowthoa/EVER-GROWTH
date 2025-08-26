@@ -350,6 +350,20 @@ def run_chungho_install_date_updater():
 # -------------------------------
 # 청호 진행상황 업데이트
 # -------------------------------
+def worksheet_to_dataframe(ws):
+    data = ws.get_all_values()
+    df = pd.DataFrame(data[1:], columns=data[0])
+    return df
+
+def get_or_create_log(sheet):
+    try:
+        ws_log = sheet.worksheet("Log")
+    except:
+        ws_log = sheet.add_worksheet("Log", rows=1000, cols=10)
+        ws_log.append_row(["시간", "고객명", "계약번호", "내용"])
+    return ws_log
+
+
 def run_script_cheongho():
     try:
         # ==========================
@@ -360,11 +374,10 @@ def run_script_cheongho():
         client = gspread.authorize(creds)
 
         sheet = client.open_by_url(SPREADSHEET_URL)
-        ws1 = sheet.get_worksheet(0)
-        ws3 = sheet.get_worksheet(2)
+        ws1 = sheet.get_worksheet(0)   # 메인 시트
+        ws3 = sheet.get_worksheet(2)   # 청호 설치 시트
         ws_log = get_or_create_log(sheet)
 
-        # ✅ get_all_records() → worksheet_to_dataframe() 사용
         df1 = worksheet_to_dataframe(ws1)
         df3 = worksheet_to_dataframe(ws3)
 
@@ -387,6 +400,7 @@ def run_script_cheongho():
 
             계약번호_뒤4 = 계약번호[-4:]
 
+            # ✅ ws3에서 계약번호 뒤4자리 & 고객명 포함 여부로 매칭
             match_df = df3[
                 (df3["계약번호"].astype(str).str[-4:] == 계약번호_뒤4) &
                 (df3["고객명"].astype(str).str.contains(고객명, na=False))
@@ -395,18 +409,20 @@ def run_script_cheongho():
             if not match_df.empty:
                 for _, match_row in match_df.iterrows():
                     진행상태 = str(match_row.get("진행상태", "")).strip()
-                    특이_L값 = str(match_row.get("L", "")).strip()  # ws3의 L열 값 (실제 이름 확인 필요!)
+                    설치예정일값 = str(match_row.get("설치예정일", "")).strip()  # ✅ ws3의 설치예정일 열 사용
 
                     if 진행상태 in ["출고의뢰", "출고확정"]:
+                        # ✅ 설치예정일 → yy-mm-dd 변환
                         try:
-                            특이일자 = pd.to_datetime(특이_L값, errors="coerce")
-                            특이일자_str = 특이일자.strftime("%y-%m-%d") if pd.notna(특이일자) else 특이_L값
+                            설치예정일 = pd.to_datetime(설치예정일값, errors="coerce")
+                            설치예정일_str = 설치예정일.strftime("%m-%d 설치예정//") if pd.notna(설치예정일) else 설치예정일값
                         except Exception:
-                            특이일자_str = 특이_L값
+                            설치예정일_str = 설치예정일값
 
                         기존특이 = str(row.get("특이사항", "")).strip()
-                        새로운특이 = f"{특이일자_str} {기존특이}".strip()
+                        새로운특이 = f"{설치예정일_str} {기존특이}".strip()
 
+                        # ✅ 진행상황/특이사항 업데이트
                         df1.at[idx, "진행상황"] = "승인완료"
                         df1.at[idx, "특이사항"] = 새로운특이
 
@@ -422,13 +438,12 @@ def run_script_cheongho():
         ws1.update([df1.columns.values.tolist()] + df1.values.tolist())
 
         if updated_rows:
-            ws_log.append_rows(updated_rows)  # ✅ log_ws → ws_log
+            ws_log.append_rows(updated_rows)
 
         messagebox.showinfo("완료", f"청호 진행상황 업데이트 완료!\n총 {len(updated_rows)}건 변경됨")
 
     except Exception as e:
         messagebox.showerror("오류 발생", str(e))
-
 
 
 # -------------------------------
