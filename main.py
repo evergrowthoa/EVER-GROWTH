@@ -426,6 +426,14 @@ def run_script_cheongho():
                         df1.at[idx, "진행상황"] = "승인완료"
                         df1.at[idx, "특이사항"] = 새로운특이
 
+                        # ✅ 업데이트된 행 노란색 표시
+                        from gspread_formatting import CellFormat, Color, format_cell_range
+                        rownum = idx + 2  # (1행은 헤더, 데이터는 2행부터 시작)
+                        highlight = CellFormat(
+                            backgroundColor=Color(1, 1, 0)  # RGB (노란색)
+                        )
+                        format_cell_range(ws1, f"A{rownum}:Z{rownum}", highlight)
+
                         updated_rows.append([
                             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                             row["고객명"], 계약번호,
