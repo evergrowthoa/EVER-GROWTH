@@ -469,6 +469,19 @@ if __name__ == "__main__":
 
     root.mainloop()
 
+#확장프로그램 목록
+#dracula-theme.theme-dracula
+#github.copilot
+#github.copilot-chat
+#ms-ceintl.vscode-language-pack-ko
+#ms-python.debugpy
+#ms-python.python
+#ms-python.vscode-pylance
+#oderwat.indent-rainbow
+#pkief.material-icon-theme
+#usernamehw.errorlens
+
+
 # 한 번만 설정
 #git config --global user.name "본인 이름"
 #git config --global user.email "가입한 GitHub 이메일"
