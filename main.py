@@ -201,6 +201,7 @@ def run_install_date_updater():
         df1 = pd.DataFrame(ws1.get_all_records())
         df2 = pd.DataFrame(ws2.get_all_records())
 
+        # ----------- 데이터 전처리 -----------
         for col in ["진행상황", "브랜드", "계약번호", "고객명"]:
             if col in df1.columns:
                 df1[col] = df1[col].astype(str).str.strip()
@@ -209,15 +210,17 @@ def run_install_date_updater():
             if col in df2.columns:
                 df2[col] = df2[col].astype(str).str.strip()
 
+        # 설치일은 메인시트 "진행상황(D)" 에 입력
         col_status = get_col_index(ws1, "진행상황")
         col_brand  = get_col_index(ws1, "브랜드")
-        col_c      = get_col_index(ws1, "진행상황")  # 설치일 입력할 위치 → 실제는 C열 헤더 확인 후 수정
         col_v      = get_col_index(ws1, "계약번호")
         col_customer = get_col_index(ws1, "고객명")
 
-        condition = (df1["진행상황"] == "승인완료") & (df1["브랜드"] == "코웨이")
+        # ----------- 조건: 브랜드 = '코웨이' + 진행상황 = 승인완료 -----------
+        condition = (df1["브랜드"] == "코웨이") & (df1["진행상황"] == "승인완료")
 
         updated = 0
+
         for idx, row in df1[condition].iterrows():
             v_value = str(row.get("계약번호", "")).strip()
             v_last4 = ''.join(re.findall(r'\d+', v_value))[-4:] if v_value else ''
@@ -226,23 +229,48 @@ def run_install_date_updater():
             if not v_last4:
                 continue
 
+            # ----------- Sheet2 매칭 -----------
             for row2 in df2.itertuples():
+
                 b_last4 = str(getattr(row2, "주문번호", ""))[-4:]
                 customer2 = str(getattr(row2, "고객명", "")).strip()
                 status = str(getattr(row2, "상태", "")).strip()
 
-                if v_last4 == b_last4 and customer1 and (customer1 in customer2) and status == "순주문확정":
+                # ⚠ 상태 공백 제거 + 전체 공백 삭제
+                clean_status = status.replace(" ", "").strip()
+
+                # ⚠ 여기 변경됨!
+                # 순주문확정 OR 설치확정 → 공백/변형 상관없이 인식
+                status_ok = (
+                    "순주문확정" in clean_status or
+                    "설치확정" in clean_status
+                )
+
+                # ----------- 전체 매칭 조건 -----------
+                if (
+                    v_last4 == b_last4 and
+                    customer1 in customer2 and
+                    status_ok
+                ):
+
                     raw_date = str(getattr(row2, "설치예정일", "")).strip()
+
+                    # ----------- 날짜 변환 YY-MM-DD -----------
                     try:
-                        formatted_date = datetime.strptime(raw_date, "%Y.%m.%d").strftime("%y-%m-%d")
-                        ws1.update_cell(idx + 2, col_status, formatted_date)
-                        try:
-                            format_cell_range(ws1, f'{chr(64+col_status)}{idx + 2}', yellow_fill)
-                        except Exception:
-                            pass
-                        updated += 1
-                    except Exception:
+                        parsed = datetime.strptime(raw_date, "%Y.%m.%d")
+                        formatted_date = parsed.strftime("%y-%m-%d")
+                    except:
+                        formatted_date = raw_date  # 실패 시 원본
+
+                    # ----------- D열(진행상황)에 설치일 입력 -----------
+                    ws1.update_cell(idx + 2, col_status, formatted_date)
+
+                    try:
+                        format_cell_range(ws1, f'{chr(64+col_status)}{idx + 2}', yellow_fill)
+                    except:
                         pass
+
+                    updated += 1
                     break
 
         messagebox.showinfo("완료", f"설치일 입력 완료!\n총 {updated}건 변경됨 ✅")
