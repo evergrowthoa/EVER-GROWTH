@@ -8,14 +8,13 @@ import webbrowser
 import re
 import os
 import sys
-from gspread_formatting import CellFormat, Color, format_cell_range
-from gspread.exceptions import WorksheetNotFound
 import time
-from gspread.exceptions import APIError
-from gspread_formatting import format_cell_ranges
+
+from gspread.exceptions import WorksheetNotFound, APIError
+from gspread_formatting import CellFormat, Color, format_cell_range, format_cell_ranges
+from gspread.utils import rowcol_to_a1
 
 def _with_retry(fn, *args, **kwargs):
-    """429/503일 때 지수백오프로 자동 재시도."""
     tries = kwargs.pop("_tries", 5)
     for i in range(tries):
         try:
@@ -190,8 +189,13 @@ def run_script():
 # -------------------------------
 def run_install_date_updater():
     try:
-        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
+        scope = [
+            'https://spreadsheets.google.com/feeds',
+            'https://www.googleapis.com/auth/drive'
+        ]
+        creds = ServiceAccountCredentials.from_json_keyfile_name(
+            CREDENTIALS_FILE, scope
+        )
         client = gspread.authorize(creds)
 
         sheet = client.open_by_url(SPREADSHEET_URL)
@@ -201,79 +205,128 @@ def run_install_date_updater():
         df1 = pd.DataFrame(ws1.get_all_records())
         df2 = pd.DataFrame(ws2.get_all_records())
 
-        # ----------- 데이터 전처리 -----------
-        for col in ["진행상황", "브랜드", "계약번호", "고객명"]:
-            if col in df1.columns:
-                df1[col] = df1[col].astype(str).str.strip()
+        col_status   = get_col_index(ws1, "진행상황")
+        col_contract = get_col_index(ws1, "계약번호")
 
-        for col in ["주문번호", "고객명", "상태", "설치예정일"]:
-            if col in df2.columns:
-                df2[col] = df2[col].astype(str).str.strip()
+        value_updates = []
+        format_requests = []
 
-        # 설치일은 메인시트 "진행상황(D)" 에 입력
-        col_status = get_col_index(ws1, "진행상황")
-        col_brand  = get_col_index(ws1, "브랜드")
-        col_v      = get_col_index(ws1, "계약번호")
-        col_customer = get_col_index(ws1, "고객명")
+        # ✅ 고객명 정규화 (한글 + 영어 대응)
+        def normalize_name(name):
+            if not name:
+                return ""
+            # 한글 + 영어만 남기기
+            cleaned = re.sub(r"[^가-힣A-Za-z]", "", str(name))
+            return cleaned.upper()
 
-        # ----------- 조건: 브랜드 = '코웨이' + 진행상황 = 승인완료 -----------
-        condition = (df1["브랜드"] == "코웨이") & (df1["진행상황"] == "승인완료")
-
-        updated = 0
+        condition = (
+            (df1["브랜드"].astype(str).str.strip() == "코웨이") &
+            (df1["진행상황"].astype(str).str.strip() == "승인완료")
+        )
 
         for idx, row in df1[condition].iterrows():
-            v_value = str(row.get("계약번호", "")).strip()
-            v_last4 = ''.join(re.findall(r'\d+', v_value))[-4:] if v_value else ''
-            customer1 = str(row.get("고객명", "")).strip()
+            rownum = idx + 2
 
-            if not v_last4:
-                continue
+            계약번호 = str(row.get("계약번호", "")).strip()
+            고객명1_raw = str(row.get("고객명", "")).strip()
+            고객명1 = normalize_name(고객명1_raw)
 
-            # ----------- Sheet2 매칭 -----------
+            changed = False
+
             for row2 in df2.itertuples():
+                상태 = str(getattr(row2, "상태", "")).replace(" ", "")
 
-                b_last4 = str(getattr(row2, "주문번호", ""))[-4:]
-                customer2 = str(getattr(row2, "고객명", "")).strip()
-                status = str(getattr(row2, "상태", "")).strip()
+                if "순주문확정" in 상태 or "설치확정" in 상태:
+                    주문번호 = str(getattr(row2, "주문번호", "")).strip()
+                    고객명2_raw = str(getattr(row2, "고객명", "")).strip()
+                    고객명2 = normalize_name(고객명2_raw)
 
-                # ⚠ 상태 공백 제거 + 전체 공백 삭제
-                clean_status = status.replace(" ", "").strip()
+                    # ✅ 고객명 포함 매칭 (양방향)
+                    name_match = (
+                        고객명1 and 고객명2 and
+                        (고객명1 in 고객명2 or 고객명2 in 고객명1)
+                    )
 
-                # ⚠ 여기 변경됨!
-                # 순주문확정 OR 설치확정 → 공백/변형 상관없이 인식
-                status_ok = (
-                    "순주문확정" in clean_status or
-                    "설치확정" in clean_status
-                )
+                    if (
+                        계약번호[-4:] == 주문번호[-4:]
+                        and name_match
+                    ):
+                        raw = str(getattr(row2, "설치예정일", "")).strip()
+                        try:
+                            parsed = datetime.strptime(raw, "%Y.%m.%d")
+                            formatted = parsed.strftime("%y-%m-%d")
+                        except:
+                            formatted = raw
 
-                # ----------- 전체 매칭 조건 -----------
-                if (
-                    v_last4 == b_last4 and
-                    customer1 in customer2 and
-                    status_ok
-                ):
+                        a1 = rowcol_to_a1(rownum, col_status)
+                        value_updates.append({
+                            "range": f"{ws1.title}!{a1}",
+                            "values": [[formatted]]
+                        })
 
-                    raw_date = str(getattr(row2, "설치예정일", "")).strip()
+                        # 🟨 진행상황 노란색
+                        format_requests.append({
+                            "repeatCell": {
+                                "range": {
+                                    "sheetId": ws1.id,
+                                    "startRowIndex": rownum - 1,
+                                    "endRowIndex": rownum,
+                                    "startColumnIndex": col_status - 1,
+                                    "endColumnIndex": col_status
+                                },
+                                "cell": {
+                                    "userEnteredFormat": {
+                                        "backgroundColor": {
+                                            "red": 1,
+                                            "green": 1,
+                                            "blue": 0.6
+                                        }
+                                    }
+                                },
+                                "fields": "userEnteredFormat.backgroundColor"
+                            }
+                        })
 
-                    # ----------- 날짜 변환 YY-MM-DD -----------
-                    try:
-                        parsed = datetime.strptime(raw_date, "%Y.%m.%d")
-                        formatted_date = parsed.strftime("%y-%m-%d")
-                    except:
-                        formatted_date = raw_date  # 실패 시 원본
+                        changed = True
+                        break
 
-                    # ----------- D열(진행상황)에 설치일 입력 -----------
-                    ws1.update_cell(idx + 2, col_status, formatted_date)
+            # ❌ 매칭 실패 → 계약번호 빨간색
+            if not changed:
+                format_requests.append({
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": ws1.id,
+                            "startRowIndex": rownum - 1,
+                            "endRowIndex": rownum,
+                            "startColumnIndex": col_contract - 1,
+                            "endColumnIndex": col_contract
+                        },
+                        "cell": {
+                            "userEnteredFormat": {
+                                "backgroundColor": {
+                                    "red": 1,
+                                    "green": 0.6,
+                                    "blue": 0.6
+                                }
+                            }
+                        },
+                        "fields": "userEnteredFormat.backgroundColor"
+                    }
+                })
 
-                    try:
-                        format_cell_range(ws1, f'{chr(64+col_status)}{idx + 2}', yellow_fill)
-                    except:
-                        pass
+        # ✅ API 호출 최소화 (Quota-safe)
+        if value_updates:
+            batch_values_update(sheet, value_updates)
 
-                    updated += 1
-                    break
+        if format_requests:
+            sheet.batch_update({"requests": format_requests})
 
-        messagebox.showinfo("완료", f"설치일 입력 완료!\n총 {updated}건 변경됨 ✅")
+        messagebox.showinfo(
+            "완료",
+            "설치일 처리 완료\n"
+            "✔ 매칭 성공 → 날짜 입력 (노란색)\n"
+            "❌ 매칭 실패 → 계약번호 빨간색"
+        )
 
     except Exception as e:
         messagebox.showerror("에러 발생", str(e))
