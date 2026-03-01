@@ -24,7 +24,7 @@ SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/17qWvyVONniRI758kESiYS
 LOG_SHEET_GID = "1370173144"  # Log 시트 gid 넣기
 
 # 인증 파일
-CREDENTIALS_FILE = 'numeric-haven-455700-k8-ce44177240c2.json'
+CREDENTIALS_FILE = 'clae-haven-455700-k8-ce44177240c2.json'
 
 
 # ▶️ 작업 실행 함수
