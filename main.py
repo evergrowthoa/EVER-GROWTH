@@ -8,14 +8,13 @@ import webbrowser
 import re
 import os
 import sys
-from gspread_formatting import CellFormat, Color, format_cell_range
-from gspread.exceptions import WorksheetNotFound
 import time
-from gspread.exceptions import APIError
-from gspread_formatting import format_cell_ranges
+
+from gspread.exceptions import WorksheetNotFound, APIError
+from gspread_formatting import CellFormat, Color, format_cell_range, format_cell_ranges
+from gspread.utils import rowcol_to_a1
 
 def _with_retry(fn, *args, **kwargs):
-    """429/503일 때 지수백오프로 자동 재시도."""
     tries = kwargs.pop("_tries", 5)
     for i in range(tries):
         try:
@@ -190,8 +189,13 @@ def run_script():
 # -------------------------------
 def run_install_date_updater():
     try:
-        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
+        scope = [
+            'https://spreadsheets.google.com/feeds',
+            'https://www.googleapis.com/auth/drive'
+        ]
+        creds = ServiceAccountCredentials.from_json_keyfile_name(
+            CREDENTIALS_FILE, scope
+        )
         client = gspread.authorize(creds)
 
         sheet = client.open_by_url(SPREADSHEET_URL)
@@ -201,51 +205,128 @@ def run_install_date_updater():
         df1 = pd.DataFrame(ws1.get_all_records())
         df2 = pd.DataFrame(ws2.get_all_records())
 
-        for col in ["진행상황", "브랜드", "계약번호", "고객명"]:
-            if col in df1.columns:
-                df1[col] = df1[col].astype(str).str.strip()
+        col_status   = get_col_index(ws1, "진행상황")
+        col_contract = get_col_index(ws1, "계약번호")
 
-        for col in ["주문번호", "고객명", "상태", "설치예정일"]:
-            if col in df2.columns:
-                df2[col] = df2[col].astype(str).str.strip()
+        value_updates = []
+        format_requests = []
 
-        col_status = get_col_index(ws1, "진행상황")
-        col_brand  = get_col_index(ws1, "브랜드")
-        col_c      = get_col_index(ws1, "진행상황")  # 설치일 입력할 위치 → 실제는 C열 헤더 확인 후 수정
-        col_v      = get_col_index(ws1, "계약번호")
-        col_customer = get_col_index(ws1, "고객명")
+        # ✅ 고객명 정규화 (한글 + 영어 대응)
+        def normalize_name(name):
+            if not name:
+                return ""
+            # 한글 + 영어만 남기기
+            cleaned = re.sub(r"[^가-힣A-Za-z]", "", str(name))
+            return cleaned.upper()
 
-        condition = (df1["진행상황"] == "승인완료") & (df1["브랜드"] == "코웨이")
+        condition = (
+            (df1["브랜드"].astype(str).str.strip() == "코웨이") &
+            (df1["진행상황"].astype(str).str.strip() == "승인완료")
+        )
 
-        updated = 0
         for idx, row in df1[condition].iterrows():
-            v_value = str(row.get("계약번호", "")).strip()
-            v_last4 = ''.join(re.findall(r'\d+', v_value))[-4:] if v_value else ''
-            customer1 = str(row.get("고객명", "")).strip()
+            rownum = idx + 2
 
-            if not v_last4:
-                continue
+            계약번호 = str(row.get("계약번호", "")).strip()
+            고객명1_raw = str(row.get("고객명", "")).strip()
+            고객명1 = normalize_name(고객명1_raw)
+
+            changed = False
 
             for row2 in df2.itertuples():
-                b_last4 = str(getattr(row2, "주문번호", ""))[-4:]
-                customer2 = str(getattr(row2, "고객명", "")).strip()
-                status = str(getattr(row2, "상태", "")).strip()
+                상태 = str(getattr(row2, "상태", "")).replace(" ", "")
 
-                if v_last4 == b_last4 and customer1 and (customer1 in customer2) and status == "순주문확정":
-                    raw_date = str(getattr(row2, "설치예정일", "")).strip()
-                    try:
-                        formatted_date = datetime.strptime(raw_date, "%Y.%m.%d").strftime("%y-%m-%d")
-                        ws1.update_cell(idx + 2, col_status, formatted_date)
+                if "순주문확정" in 상태 or "설치확정" in 상태:
+                    주문번호 = str(getattr(row2, "주문번호", "")).strip()
+                    고객명2_raw = str(getattr(row2, "고객명", "")).strip()
+                    고객명2 = normalize_name(고객명2_raw)
+
+                    # ✅ 고객명 포함 매칭 (양방향)
+                    name_match = (
+                        고객명1 and 고객명2 and
+                        (고객명1 in 고객명2 or 고객명2 in 고객명1)
+                    )
+
+                    if (
+                        계약번호[-4:] == 주문번호[-4:]
+                        and name_match
+                    ):
+                        raw = str(getattr(row2, "설치예정일", "")).strip()
                         try:
-                            format_cell_range(ws1, f'{chr(64+col_status)}{idx + 2}', yellow_fill)
-                        except Exception:
-                            pass
-                        updated += 1
-                    except Exception:
-                        pass
-                    break
+                            parsed = datetime.strptime(raw, "%Y.%m.%d")
+                            formatted = parsed.strftime("%y-%m-%d")
+                        except:
+                            formatted = raw
 
-        messagebox.showinfo("완료", f"설치일 입력 완료!\n총 {updated}건 변경됨 ✅")
+                        a1 = rowcol_to_a1(rownum, col_status)
+                        value_updates.append({
+                            "range": f"{ws1.title}!{a1}",
+                            "values": [[formatted]]
+                        })
+
+                        # 🟨 진행상황 노란색
+                        format_requests.append({
+                            "repeatCell": {
+                                "range": {
+                                    "sheetId": ws1.id,
+                                    "startRowIndex": rownum - 1,
+                                    "endRowIndex": rownum,
+                                    "startColumnIndex": col_status - 1,
+                                    "endColumnIndex": col_status
+                                },
+                                "cell": {
+                                    "userEnteredFormat": {
+                                        "backgroundColor": {
+                                            "red": 1,
+                                            "green": 1,
+                                            "blue": 0.6
+                                        }
+                                    }
+                                },
+                                "fields": "userEnteredFormat.backgroundColor"
+                            }
+                        })
+
+                        changed = True
+                        break
+
+            # ❌ 매칭 실패 → 계약번호 빨간색
+            if not changed:
+                format_requests.append({
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": ws1.id,
+                            "startRowIndex": rownum - 1,
+                            "endRowIndex": rownum,
+                            "startColumnIndex": col_contract - 1,
+                            "endColumnIndex": col_contract
+                        },
+                        "cell": {
+                            "userEnteredFormat": {
+                                "backgroundColor": {
+                                    "red": 1,
+                                    "green": 0.6,
+                                    "blue": 0.6
+                                }
+                            }
+                        },
+                        "fields": "userEnteredFormat.backgroundColor"
+                    }
+                })
+
+        # ✅ API 호출 최소화 (Quota-safe)
+        if value_updates:
+            batch_values_update(sheet, value_updates)
+
+        if format_requests:
+            sheet.batch_update({"requests": format_requests})
+
+        messagebox.showinfo(
+            "완료",
+            "설치일 처리 완료\n"
+            "✔ 매칭 성공 → 날짜 입력 (노란색)\n"
+            "❌ 매칭 실패 → 계약번호 빨간색"
+        )
 
     except Exception as e:
         messagebox.showerror("에러 발생", str(e))
@@ -295,7 +376,7 @@ def run_chungho_install_date_updater():
 
             if not v_last4:
                 log_rows.append([datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                  f_value, v_value, "⛔ 계약번호에 숫자 없음", ""])
+                                f_value, v_value, "⛔ 계약번호에 숫자 없음", ""])
                 continue
 
             for _, row3 in df3.iterrows():
@@ -304,7 +385,7 @@ def run_chungho_install_date_updater():
                 n_val   = str(row3.get("진행상태") or row3.get("상태") or "").strip()
                 m_val   = str(row3.get("설치예정일") or row3.get("매출일") or "").strip()
 
-                if (v_last4 == b_last4) and f_value and (f_value in c_name):
+                if (v_last4 == b_last4) and f_value and c_name and (c_name in f_value):
                     if n_val == "매출확정":
                         try:
                             dt = datetime.strptime(m_val, "%Y-%m-%d")
@@ -318,15 +399,15 @@ def run_chungho_install_date_updater():
                             fmt_ranges.append((f"{chr(64+col_y)}{rownum}", yellow_fill))
 
                             log_rows.append([datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                             f_value, v_value, "청호 설치확정일 및 정산월 입력", f"설치확정일={c_text}, 정산월={y_val}"])
+                                            f_value, v_value, "청호 설치확정일 및 정산월 입력", f"설치확정일={c_text}, 정산월={y_val}"])
                             updated_count += 1
                         except Exception:
                             log_rows.append([datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                             f_value, v_value, "⛔ 날짜 변환 오류", f"raw={m_val}"])
+                                            f_value, v_value, "⛔ 날짜 변환 오류", f"raw={m_val}"])
                         break
                     else:
                         log_rows.append([datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                         f_value, v_value, f"⛔ 상태 불일치: {n_val}", ""])
+                                        f_value, v_value, f"⛔ 상태 불일치: {n_val}", ""])
                         break
 
         if updates:
@@ -400,45 +481,38 @@ def run_script_cheongho():
 
             계약번호_뒤4 = 계약번호[-4:]
 
-            # ✅ ws3에서 계약번호 뒤4자리 & 고객명 포함 여부로 매칭
-            match_df = df3[
-                (df3["계약번호"].astype(str).str[-4:] == 계약번호_뒤4) &
-                (df3["고객명"].astype(str).str.contains(고객명, na=False))
-            ]
+    # ✅ 루프 돌면서 df1 안에 df3 고객명이 포함되는지 확인
+            for _, row3 in df3.iterrows():
+                if str(row3["계약번호"]).strip()[-4:] == 계약번호_뒤4:
+                    고객명3 = str(row3["고객명"]).strip()
+                    if 고객명3 and (고객명.find(고객명3) != -1):   # df1 안에 df3이 포함되어 있으면 매칭
+                        진행상태 = str(row3.get("진행상태", "")).strip()
+                        설치예정일값 = str(row3.get("설치예정일", "")).strip()
 
-            if not match_df.empty:
-                for _, match_row in match_df.iterrows():
-                    진행상태 = str(match_row.get("진행상태", "")).strip()
-                    설치예정일값 = str(match_row.get("설치예정일", "")).strip()  # ✅ ws3의 설치예정일 열 사용
+                        if 진행상태 in ["출고의뢰", "출고확정"]:
+                            try:
+                                설치예정일 = pd.to_datetime(설치예정일값, errors="coerce")
+                                설치예정일_str = 설치예정일.strftime("%m-%d 설치예정//") if pd.notna(설치예정일) else 설치예정일값
+                            except Exception:
+                                설치예정일_str = 설치예정일값
 
-                    if 진행상태 in ["출고의뢰", "출고확정"]:
-                        # ✅ 설치예정일 → yy-mm-dd 변환
-                        try:
-                            설치예정일 = pd.to_datetime(설치예정일값, errors="coerce")
-                            설치예정일_str = 설치예정일.strftime("%m-%d 설치예정//") if pd.notna(설치예정일) else 설치예정일값
-                        except Exception:
-                            설치예정일_str = 설치예정일값
+                            기존특이 = str(row.get("특이사항", "")).strip()
+                            새로운특이 = f"{설치예정일_str} {기존특이}".strip()
 
-                        기존특이 = str(row.get("특이사항", "")).strip()
-                        새로운특이 = f"{설치예정일_str} {기존특이}".strip()
+                            df1.at[idx, "진행상황"] = "승인완료"
+                            df1.at[idx, "특이사항"] = 새로운특이
 
-                        # ✅ 진행상황/특이사항 업데이트
-                        df1.at[idx, "진행상황"] = "승인완료"
-                        df1.at[idx, "특이사항"] = 새로운특이
+                            rownum = idx + 2
+                            highlight = CellFormat(backgroundColor=Color(1, 1, 0))
+                            format_cell_range(ws1, f"A{rownum}:Z{rownum}", highlight)
 
-                        # ✅ 업데이트된 행 노란색 표시
-                        from gspread_formatting import CellFormat, Color, format_cell_range
-                        rownum = idx + 2  # (1행은 헤더, 데이터는 2행부터 시작)
-                        highlight = CellFormat(
-                            backgroundColor=Color(1, 1, 0)  # RGB (노란색)
-                        )
-                        format_cell_range(ws1, f"A{rownum}:Z{rownum}", highlight)
+                            updated_rows.append([
+                                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                row["고객명"], 계약번호,
+                                f"승인완료 / 특이사항: {새로운특이}"
+                            ])
+                        break
 
-                        updated_rows.append([
-                            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            row["고객명"], 계약번호,
-                            f"승인완료 / 특이사항: {새로운특이}"
-                        ])
 
         # ==========================
         # 시트 반영
@@ -475,6 +549,19 @@ if __name__ == "__main__":
     Button(root, text="수정 로그 확인",             command=open_log_sheet,                 width=34, height=2, bg="lightblue").pack(pady=8)
 
     root.mainloop()
+
+#확장프로그램 목록
+#dracula-theme.theme-dracula
+#github.copilot
+#github.copilot-chat
+#ms-ceintl.vscode-language-pack-ko
+#ms-python.debugpy
+#ms-python.python
+#ms-python.vscode-pylance
+#oderwat.indent-rainbow
+#pkief.material-icon-theme
+#usernamehw.errorlens
+
 
 # 한 번만 설정
 #git config --global user.name "본인 이름"
