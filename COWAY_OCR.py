@@ -65,6 +65,7 @@ while True:
     try:
         inputs = driver.find_elements(By.TAG_NAME, "input")
 
+        # 모달이 열렸을 때 (input이 많아짐)
         if len(inputs) > 15:
 
             name = inputs[10].get_attribute("value")
@@ -73,12 +74,17 @@ while True:
             account = inputs[13].get_attribute("value")
             zipcode = inputs[14].get_attribute("value")
 
+            # 📌 전화번호 없으면 무시 (빈 모달 방지)
+            if not phone or not phone.strip():
+                time.sleep(0.5)
+                continue
+
             # 📌 이미 처리한 번호면 스킵
             if phone in processed_phones:
                 time.sleep(1)
                 continue
 
-            # 새 번호면 저장
+            # 신규 고객 저장
             processed_phones.add(phone)
 
             print("\n✅ 신규 고객 감지")
@@ -91,5 +97,9 @@ while True:
 
             time.sleep(2)
 
-    except:
-        pass
+        else:
+            time.sleep(0.5)
+
+    except Exception as e:
+        print("에러 발생:", e)
+        time.sleep(1)
