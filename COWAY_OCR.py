@@ -4,7 +4,6 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 import time
 
-# 🔹 아이디 / 비번
 USER_ID = "evergrowth"
 USER_PW = "wkrlfjqm1!"
 
@@ -12,51 +11,35 @@ driver = webdriver.Chrome()
 driver.maximize_window()
 wait = WebDriverWait(driver, 15)
 
-# 1️⃣ 로그인 페이지 직접 접속
+# 1️⃣ 로그인
 driver.get("https://allnup.com/login.php")
 
-# 2️⃣ 아이디 입력
 wait.until(EC.presence_of_element_located((By.ID, "userid")))
 driver.find_element(By.ID, "userid").send_keys(USER_ID)
-
-# 3️⃣ 비밀번호 입력
 driver.find_element(By.ID, "password").send_keys(USER_PW)
-
-# 4️⃣ 로그인 버튼 클릭
 driver.find_element(By.CSS_SELECTOR, "button[type='submit']").click()
 
-print("로그인 버튼 클릭 완료")
+print("로그인 완료")
 
-# 5️⃣ 로그인 완료 대기 (메인 페이지 로딩)
-wait.until(EC.url_contains("allnup.com"))
-print("로그인 성공")
-
-# 6️⃣ 접수 리스트 페이지 이동
+# 2️⃣ 접수요청 페이지 이동
 driver.get("https://allnup.com/layout.php?page=receipt.php")
 
-# 7️⃣ iframe 기다렸다가 진입
-wait.until(EC.presence_of_element_located((By.TAG_NAME, "iframe")))
-iframe = driver.find_element(By.TAG_NAME, "iframe")
-driver.switch_to.frame(iframe)
+print("📌 이제 수동으로 리스트에서 원하는 고객을 클릭해서 모달을 띄우세요.")
+print("📌 모달이 뜨면 자동으로 고객정보를 읽습니다.")
 
-print("iframe 진입 완료")
+# 3️⃣ 무한 대기 → 모달 뜨는 순간 감지
+while True:
+    try:
+        wait.until(EC.visibility_of_element_located((By.ID, "customer_name")))
 
-# 8️⃣ 리스트 행 로딩 대기
-wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "table tbody tr")))
-rows = driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
+        name = driver.find_element(By.ID, "customer_name").get_attribute("value")
+        phone = driver.find_element(By.ID, "customer_phone").get_attribute("value")
 
-print("행 개수:", len(rows))
+        print("고객명:", name)
+        print("전화번호:", phone)
+        print("------------")
 
-# 9️⃣ 첫 번째 행 클릭 테스트
-if len(rows) > 0:
-    rows[0].click()
+        time.sleep(3)  # 중복 감지 방지용 대기
 
-    wait.until(EC.visibility_of_element_located((By.ID, "customer_name")))
-    name = driver.find_element(By.ID, "customer_name").get_attribute("value")
-    print("고객명:", name)
-
-else:
-    print("행이 없습니다.")
-
-time.sleep(5)
-driver.quit()
+    except:
+        pass
