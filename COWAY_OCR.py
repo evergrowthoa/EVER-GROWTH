@@ -2,76 +2,94 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
+from selenium.webdriver.chrome.options import Options
 import time
 
 # ===========================
-# 1. 드라이버 실행
+# 로그인 정보
 # ===========================
-driver = webdriver.Chrome()
+USER_ID = "evergrowth"
+USER_PW = "wkrlfjqm1!"
+
+# ===========================
+# 크롬 옵션
+# ===========================
+chrome_options = Options()
+chrome_options.add_argument("--start-maximized")
+chrome_options.add_experimental_option("detach", True)
+
+driver = webdriver.Chrome(options=chrome_options)
 wait = WebDriverWait(driver, 20)
 
+# ===========================
+# 1. 사이트 접속
+# ===========================
 driver.get("https://allnup.com")
 
-# ===========================
-# 2. 로그인
-# ===========================
-wait.until(EC.presence_of_element_located((By.NAME, "mb_id"))).send_keys("아이디입력")
-driver.find_element(By.NAME, "mb_password").send_keys("비밀번호입력")
+wait.until(lambda d: len(d.find_elements(By.TAG_NAME, "input")) >= 2)
+inputs = driver.find_elements(By.TAG_NAME, "input")
 
-driver.find_element(By.CSS_SELECTOR, "button[type='submit']").click()
-print("로그인 버튼 클릭")
+inputs[0].send_keys(USER_ID)
+inputs[1].send_keys(USER_PW)
+
+buttons = driver.find_elements(By.TAG_NAME, "button")
+if buttons:
+    buttons[0].click()
+else:
+    driver.find_element(By.CSS_SELECTOR, "input[type='submit']").click()
 
 time.sleep(3)
-print("로그인 성공")
 
 # ===========================
-# 3. 접수리스트 페이지로 바로 이동
+# 2. 접수리스트 이동
 # ===========================
 driver.get("https://allnup.com/layout.php?page=receipt.php")
-print("접수리스트 이동")
 
-# ===========================
-# 4. iframe 진입 (중요)
-# ===========================
 wait.until(EC.presence_of_element_located((By.TAG_NAME, "iframe")))
 iframe = driver.find_element(By.TAG_NAME, "iframe")
 driver.switch_to.frame(iframe)
-print("iframe 진입 완료")
 
-# ===========================
-# 5. 리스트 로딩 대기
-# ===========================
 wait.until(EC.presence_of_element_located((By.TAG_NAME, "table")))
-print("리스트 로딩 완료")
 
-print("\n📌 이제 원하는 고객을 수동 클릭해서 모달을 띄우세요")
+print("\n📌 고객을 수동 클릭해서 모달을 띄우세요.\n")
 
 # ===========================
-# 6. 모달 감지 루프 (핵심)
+# 3. 중복 방지용 저장소
+# ===========================
+processed_phones = set()
+
+# ===========================
+# 4. 모달 감시 루프
 # ===========================
 while True:
     try:
-        # 모달 안에 있는 고객명 input 감지
-        customer_name = wait.until(
-            EC.presence_of_element_located((By.NAME, "customer_name"))
-        )
+        inputs = driver.find_elements(By.TAG_NAME, "input")
 
-        print("\n✅ 모달 감지 성공!")
+        if len(inputs) > 15:
 
-        # 값 읽기
-        name = customer_name.get_attribute("value")
-        phone = driver.find_element(By.NAME, "customer_tel").get_attribute("value")
-        birth = driver.find_element(By.NAME, "customer_birth").get_attribute("value")
+            name = inputs[10].get_attribute("value")
+            birth = inputs[11].get_attribute("value")
+            phone = inputs[12].get_attribute("value")
+            account = inputs[13].get_attribute("value")
+            zipcode = inputs[14].get_attribute("value")
 
-        print("고객명:", name)
-        print("연락처:", phone)
-        print("생년월일:", birth)
+            # 📌 이미 처리한 번호면 스킵
+            if phone in processed_phones:
+                time.sleep(1)
+                continue
 
-        print("\n📌 다음 고객을 클릭하세요 (계속 감시 중)\n")
+            # 새 번호면 저장
+            processed_phones.add(phone)
 
-        time.sleep(2)
+            print("\n✅ 신규 고객 감지")
+            print("이름:", name)
+            print("생년월일:", birth)
+            print("전화번호:", phone)
+            print("계좌:", account)
+            print("우편번호:", zipcode)
+            print("-" * 40)
 
-    except TimeoutException:
-        # 모달이 아직 안뜬 상태
+            time.sleep(2)
+
+    except:
         pass
