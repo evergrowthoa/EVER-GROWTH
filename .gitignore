@@ -1,0 +1,11 @@
+# 보안 키 파일 제외
+*.json
+
+# 파이썬 캐시 제외
+__pycache__/
+*.pyc
+
+# PyInstaller 빌드 결과 제외 (필요 시)
+build/
+dist/
+*.spec

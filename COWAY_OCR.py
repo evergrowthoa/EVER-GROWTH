@@ -4,11 +4,14 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 import time
+<<<<<<< HEAD
 import re
 import threading
 import queue
 
 import uiautomator2 as u2
+=======
+>>>>>>> f29392a170b3c55d41d840ed74949ffb129536d1
 
 # ===========================
 # 로그인 정보
@@ -17,12 +20,15 @@ USER_ID = "evergrowth"
 USER_PW = "wkrlfjqm1!"
 
 # ===========================
+<<<<<<< HEAD
 # 에뮬레이터 설정
 # ===========================
 ADB_SERIAL = "emulator-5554"   # adb devices에서 보이는 값으로 바꾸세요
 DO_EMULATOR = True            # 에뮬레이터 자동화를 잠깐 끄고 싶으면 False
 
 # ===========================
+=======
+>>>>>>> f29392a170b3c55d41d840ed74949ffb129536d1
 # 크롬 옵션
 # ===========================
 chrome_options = Options()
@@ -33,6 +39,7 @@ driver = webdriver.Chrome(options=chrome_options)
 wait = WebDriverWait(driver, 20)
 
 # ===========================
+<<<<<<< HEAD
 # 작업 큐 (웹 → 에뮬레이터)
 # ===========================
 job_q = queue.Queue()
@@ -162,6 +169,8 @@ t = threading.Thread(target=emulator_worker, daemon=True)
 t.start()
 
 # ===========================
+=======
+>>>>>>> f29392a170b3c55d41d840ed74949ffb129536d1
 # 1. 사이트 접속
 # ===========================
 driver.get("https://allnup.com")
@@ -203,6 +212,7 @@ processed_phones = set()
 # ===========================
 while True:
     try:
+<<<<<<< HEAD
         # 화면에 보이는 input만 대상으로 하면 index가 덜 흔들립니다.
         all_inputs = driver.find_elements(By.TAG_NAME, "input")
         inputs = [x for x in all_inputs if x.is_displayed()]
@@ -236,15 +246,45 @@ while True:
                 continue
 
             processed_phones.add(phone11)
+=======
+        inputs = driver.find_elements(By.TAG_NAME, "input")
+
+        # 모달이 열렸을 때 (input이 많아짐)
+        if len(inputs) > 15:
+
+            name = inputs[10].get_attribute("value")
+            birth = inputs[11].get_attribute("value")
+            phone = inputs[12].get_attribute("value")
+            account = inputs[13].get_attribute("value")
+            zipcode = inputs[14].get_attribute("value")
+
+            # 📌 전화번호 없으면 무시 (빈 모달 방지)
+            if not phone or not phone.strip():
+                time.sleep(0.5)
+                continue
+
+            # 📌 이미 처리한 번호면 스킵
+            if phone in processed_phones:
+                time.sleep(1)
+                continue
+
+            # 신규 고객 저장
+            processed_phones.add(phone)
+>>>>>>> f29392a170b3c55d41d840ed74949ffb129536d1
 
             print("\n✅ 신규 고객 감지")
             print("이름:", name)
             print("생년월일:", birth)
+<<<<<<< HEAD
             print("전화번호(11):", phone11)
+=======
+            print("전화번호:", phone)
+>>>>>>> f29392a170b3c55d41d840ed74949ffb129536d1
             print("계좌:", account)
             print("우편번호:", zipcode)
             print("-" * 40)
 
+<<<<<<< HEAD
             # 에뮬레이터 작업 큐에 전달
             job_q.put({
                 "name": name,
@@ -255,6 +295,9 @@ while True:
             })
 
             time.sleep(1.2)
+=======
+            time.sleep(2)
+>>>>>>> f29392a170b3c55d41d840ed74949ffb129536d1
 
         else:
             time.sleep(0.5)
