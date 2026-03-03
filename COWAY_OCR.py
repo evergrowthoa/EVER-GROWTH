@@ -7,6 +7,7 @@ import time
 import re
 import threading
 import queue
+import traceback
 
 import uiautomator2 as u2
 
@@ -23,6 +24,12 @@ ADB_SERIAL = "emulator-5554"   # adb devices에서 보이는 값
 DO_EMULATOR = True            # 테스트로 에뮬레이터 끄려면 False
 
 # ===========================
+# 주기/안전 옵션
+# ===========================
+SIGN_SCAN_INTERVAL_SEC = 20    # 인증완료 스캔 주기(원하면 10~60)
+STOP_ON_ERROR = True           # 예상 밖 오류면 중단
+
+# ===========================
 # 크롬 옵션
 # ===========================
 chrome_options = Options()
@@ -33,9 +40,27 @@ driver = webdriver.Chrome(options=chrome_options)
 wait = WebDriverWait(driver, 20)
 
 # ===========================
-# 작업 큐 (웹 → 에뮬레이터)
+# 작업 큐 (웹 → 에뮬레이터) : 인증발송 전용
 # ===========================
-job_q = queue.Queue()
+auth_q = queue.Queue()
+
+# 인증발송 성공한 건(= 인증완료에서 매칭할 대상)
+# phone11 -> name
+auth_sent_jobs = {}
+jobs_lock = threading.Lock()
+
+# 전자서명 플로우 진입(중복 방지)
+sign_started = set()
+
+# ===========================
+# 중단 플래그
+# ===========================
+STOP_FLAG = False
+
+def set_stop(reason: str):
+    global STOP_FLAG
+    STOP_FLAG = True
+    print("🛑 자동화 중단:", reason)
 
 # ===========================
 # 공통 유틸
@@ -55,6 +80,12 @@ def normalize_phone11_only_010(s: str) -> str:
         return digits
     return ""
 
+def phone11_to_display(phone11: str) -> str:
+    # 01076222590 -> 010-7622-2590
+    if not phone11 or len(phone11) != 11:
+        return ""
+    return f"{phone11[0:3]}-{phone11[3:7]}-{phone11[7:11]}"
+
 # ===========================
 # 모달(라벨 기반) 값 추출
 # ===========================
@@ -62,7 +93,6 @@ DEBUG_MODAL_ON_FAIL = True
 _last_debug_ts = 0.0
 
 def find_open_modal():
-    # 모달이 부트스트랩 계열이라면 아래 셀렉터 중 하나로 잡힘
     selectors = [
         ".modal.show",
         ".modal.in",
@@ -80,11 +110,6 @@ def find_open_modal():
     return None
 
 def find_input_near_label(modal, label_keywords):
-    """
-    label_keywords(예: ["연락처","휴대폰"]) 중 하나를 포함하는 텍스트를 찾고,
-    그 주변(같은 영역)에서 가장 가까운 input을 찾아 value를 반환.
-    """
-    # 1) (가장 흔함) 라벨 텍스트 뒤에 바로 input이 오는 케이스
     for kw in label_keywords:
         xpaths = [
             f".//label[contains(normalize-space(.), '{kw}')]/following::input[not(@type='hidden')][1]",
@@ -101,7 +126,6 @@ def find_input_near_label(modal, label_keywords):
             except Exception:
                 pass
 
-    # 2) 같은 “행/그룹” 안에서 input 찾기(조금 더 안전)
     for kw in label_keywords:
         try:
             label_el = modal.find_element(By.XPATH, f".//*[contains(normalize-space(.), '{kw}')]")
@@ -158,7 +182,6 @@ def debug_modal_inputs(modal):
     print("----- [DEBUG] 끝 -----")
 
 def extract_fields_from_modal(modal):
-    # 라벨 기반으로 최대한 정확히 찾기
     name = find_input_near_label(modal, ["고객명", "이름", "성명"])
     birth = find_input_near_label(modal, ["생년월일", "주민", "생년"])
     phone_raw = find_input_near_label(modal, ["연락처", "휴대폰번호", "휴대폰", "전화번호", "전화"])
@@ -168,16 +191,16 @@ def extract_fields_from_modal(modal):
     phone11 = normalize_phone11_only_010(phone_raw)
 
     return {
-        "name": name,
-        "birth": birth,
-        "phone_raw": phone_raw,
-        "phone11": phone11,
-        "account": account,
-        "zipcode": zipcode,
+        "name": (name or "").strip(),
+        "birth": (birth or "").strip(),
+        "phone_raw": (phone_raw or "").strip(),
+        "phone11": (phone11 or "").strip(),
+        "account": (account or "").strip(),
+        "zipcode": (zipcode or "").strip(),
     }
 
 # ===========================
-# 에뮬레이터 제어
+# 에뮬레이터 제어(단일 워커에서만 호출)
 # ===========================
 def connect_emulator():
     d = u2.connect(ADB_SERIAL)
@@ -185,12 +208,70 @@ def connect_emulator():
     return d
 
 def ensure_on_mobile_order_home(d):
-    # ✅ 화면을 건드리지 않고 확인만
     return d(text="일반 주문하기").exists
 
+def ensure_on_order_status_screen(d):
+    return d(text="주문현황").exists
+
+def goto_order_status(d) -> bool:
+    """
+    전자서명 스캔을 위해 주문현황 화면으로 이동
+    - 가능하면 건드리지 않고,
+    - 홈이면 '일반주문' 클릭으로 주문현황 진입 시도
+    """
+    if ensure_on_order_status_screen(d):
+        return True
+
+    if ensure_on_mobile_order_home(d):
+        if d(text="일반주문").exists:
+            d(text="일반주문").click()
+            time.sleep(0.8)
+            return ensure_on_order_status_screen(d)
+
+    return False
+
+def try_click_auth_done_item(d) -> bool:
+    """
+    주문현황 리스트에서 '인증완료' 항목(핑크)을 하나 클릭해서 상세로 진입.
+    인증완료가 화면에 여러 개면 첫 번째만 클릭.
+    """
+    if not ensure_on_order_status_screen(d):
+        return False
+
+    if d(text="인증완료").exists:
+        d(text="인증완료").click()
+        time.sleep(0.8)
+        return True
+
+    return False
+
+def match_detail_by_name_phone(d, name: str, phone11: str) -> bool:
+    phone_disp = phone11_to_display(phone11)
+    if not phone_disp:
+        return False
+    return d(text=name).exists and d(text=phone_disp).exists
+
+def click_order_continue(d) -> bool:
+    if d(text="주문 이어서 하기").exists:
+        d(text="주문 이어서 하기").click()
+        time.sleep(0.8)
+        return True
+    return False
+
+def back_to_order_list(d) -> bool:
+    for _ in range(4):
+        if ensure_on_order_status_screen(d):
+            return True
+        d.press("back")
+        time.sleep(0.5)
+    return ensure_on_order_status_screen(d)
+
 def send_auth_request(d, name: str, phone11: str) -> bool:
+    """
+    인증발송(A)
+    """
     if not ensure_on_mobile_order_home(d):
-        print("❌ 에뮬레이터: '일반 주문하기'가 보이는 화면이 아닙니다. (화면 전환 안 함)")
+        print("❌ 에뮬레이터: '일반 주문하기' 화면이 아닙니다.")
         return False
 
     d(text="일반 주문하기").click()
@@ -229,23 +310,20 @@ def send_auth_request(d, name: str, phone11: str) -> bool:
             break
         time.sleep(0.2)
 
-    if not clicked_auth:
-        if btn.exists:
-            btn.click()
-            time.sleep(0.6)
-            print("✅ 에뮬레이터: 본인인증 요청 클릭(강제) 시도 완료")
-            clicked_auth = True
+    if not clicked_auth and btn.exists:
+        btn.click()
+        time.sleep(0.6)
+        print("✅ 에뮬레이터: 본인인증 요청 클릭(강제) 시도 완료")
+        clicked_auth = True
 
     if not clicked_auth:
         print("❌ 에뮬레이터: '본인인증 요청' 버튼을 찾지 못했습니다.")
         return False
 
-    # ✅ 확인 팝업이 뜨면 [발송]까지 자동 클릭
-    # 팝업이 안 뜨는 환경도 있으니: "있으면 누른다" 방식으로 안전하게 처리
+    # 확인 팝업 [발송] 클릭
     send_clicked = False
     for _ in range(40):
-        title_ok = d(textContains="메시지를 발송").exists or d(textContains="고객인증").exists
-        if title_ok and d(text="발송").exists:
+        if d(text="발송").exists:
             d(text="발송").click()
             time.sleep(0.6)
             print("✅ 에뮬레이터: 확인 팝업 [발송] 클릭 완료")
@@ -253,56 +331,119 @@ def send_auth_request(d, name: str, phone11: str) -> bool:
             break
         time.sleep(0.2)
 
-    # 팝업 타이틀을 못 잡는 기기 대비(타이틀 없이 버튼만 잡히는 경우)
     if not send_clicked:
-        for _ in range(10):
-            if d(text="발송").exists:
-                d(text="발송").click()
-                time.sleep(0.6)
-                print("✅ 에뮬레이터: [발송] 클릭(타이틀 미확인) 완료")
-                send_clicked = True
-                break
-            time.sleep(0.2)
-
-    # 팝업이 있었으면 닫힐 때까지 짧게 대기(중복 클릭 방지)
-    if send_clicked:
-        for _ in range(20):
-            if not d(text="발송").exists:
-                break
-            time.sleep(0.2)
+        print("⚠️ 에뮬레이터: [발송] 팝업이 안 보였음(환경 차이 가능)")
 
     return True
 
-def emulator_worker():
+def try_start_sign_flow(d) -> bool:
+    """
+    전자서명(B) 시작점:
+    - 주문현황에서 인증완료 하나 열기
+    - 상세 화면에서 (이름+연락처)로 auth_sent_jobs 중 미처리 건과 매칭
+    - 매칭되면 '주문 이어서 하기' 클릭하고 sign_started에 기록
+    - 매칭 안 되면 뒤로가기 후 종료
+    """
+    if not goto_order_status(d):
+        return False
+
+    if not try_click_auth_done_item(d):
+        return False
+
+    matched_phone = ""
+    matched_name = ""
+
+    with jobs_lock:
+        candidates = [(p, n) for (p, n) in auth_sent_jobs.items() if p not in sign_started]
+
+    for phone11, name in candidates:
+        if match_detail_by_name_phone(d, name, phone11):
+            matched_phone = phone11
+            matched_name = name
+            break
+
+    if not matched_phone:
+        back_to_order_list(d)
+        return False
+
+    ok = click_order_continue(d)
+    if not ok:
+        print("❌ 에뮬레이터: 인증완료 상세에서 '주문 이어서 하기' 버튼을 못 찾음")
+        if STOP_ON_ERROR:
+            set_stop("전자서명 시작 실패(버튼 없음)")
+        return False
+
+    with jobs_lock:
+        sign_started.add(matched_phone)
+
+    print(f"✅ 전자서명 플로우 진입(시작): {matched_name} / {matched_phone}")
+
+    # 여기서부터 제품/색상/약정/관리/전자서명발송 단계로 이어 붙이면 됨.
+    # 현재는 '주문 이어서 하기' 진입까지만 안전하게 처리.
+    return True
+
+# ===========================
+# 에뮬레이터 단일 워커 (겹침 방지 핵심)
+# ===========================
+def emulator_main_loop():
     if not DO_EMULATOR:
         print("ℹ️ 에뮬레이터 자동화가 꺼져 있습니다(DO_EMULATOR=False).")
         while True:
-            job_q.get()
-            job_q.task_done()
+            time.sleep(1.0)
 
     d = connect_emulator()
     print("✅ 에뮬레이터 연결 완료:", ADB_SERIAL)
 
-    while True:
-        job = job_q.get()
-        try:
-            name = job.get("name", "")
-            phone11 = job.get("phone11", "")
-            print(f"🚀 에뮬레이터 작업 시작: {name} / {phone11}")
+    last_sign_scan = 0.0
 
-            ok = send_auth_request(d, name, phone11)
-            if ok:
-                print(f"✅ 인증발송 성공: {name} / {phone11}")
-            else:
-                print(f"❌ 인증발송 실패: {name} / {phone11}")
+    while True:
+        try:
+            if STOP_FLAG:
+                time.sleep(1.0)
+                continue
+
+            # 1) 전자서명(B) 스캔 우선
+            now = time.time()
+            if now - last_sign_scan >= SIGN_SCAN_INTERVAL_SEC:
+                last_sign_scan = now
+                try_start_sign_flow(d)
+
+            # 2) 전자서명 시작할 게 없을 때만 인증발송(A) 처리
+            try:
+                job = auth_q.get_nowait()
+            except queue.Empty:
+                job = None
+
+            if job is not None:
+                try:
+                    name = job.get("name", "")
+                    phone11 = job.get("phone11", "")
+                    print(f"🚀 인증발송 작업 시작: {name} / {phone11}")
+
+                    ok = send_auth_request(d, name, phone11)
+                    if ok:
+                        with jobs_lock:
+                            auth_sent_jobs[phone11] = name
+                        print(f"✅ 인증발송 성공: {name} / {phone11}")
+                    else:
+                        print(f"❌ 인증발송 실패: {name} / {phone11}")
+                        if STOP_ON_ERROR:
+                            set_stop(f"인증발송 실패: {name}/{phone11}")
+
+                finally:
+                    auth_q.task_done()
+
+            time.sleep(0.2)
 
         except Exception as e:
-            print("❌ 에뮬레이터 워커 에러:", e)
-        finally:
-            job_q.task_done()
+            print("❌ 에뮬레이터 메인 루프 에러:", e)
+            traceback.print_exc()
+            if STOP_ON_ERROR:
+                set_stop("에뮬레이터 메인 루프 예외")
+            time.sleep(1.0)
 
-t = threading.Thread(target=emulator_worker, daemon=True)
-t.start()
+t_emul = threading.Thread(target=emulator_main_loop, daemon=True)
+t_emul.start()
 
 # ===========================
 # 1. 사이트 접속
@@ -346,6 +487,10 @@ processed_phones = set()
 # ===========================
 while True:
     try:
+        if STOP_FLAG:
+            time.sleep(1.0)
+            continue
+
         modal = find_open_modal()
         if not modal:
             time.sleep(0.5)
@@ -360,7 +505,6 @@ while True:
         account = (data.get("account") or "").strip()
         zipcode = (data.get("zipcode") or "").strip()
 
-        # ✅ 전화번호(라벨 기반) 추출 실패 시: 오인 방지로 스킵 + 디버그 출력
         if not phone11:
             print("❌ 전화번호(라벨 기반) 추출 실패 → 오인 방지로 건너뜀")
             debug_modal_inputs(modal)
@@ -382,7 +526,7 @@ while True:
         print("우편번호:", zipcode)
         print("-" * 40)
 
-        job_q.put({
+        auth_q.put({
             "name": name,
             "phone11": phone11,
             "birth": birth,
@@ -394,4 +538,7 @@ while True:
 
     except Exception as e:
         print("에러 발생:", e)
-        time.sleep(1)
+        traceback.print_exc()
+        if STOP_ON_ERROR:
+            set_stop("웹 모달 루프 예외")
+        time.sleep(1.0)
