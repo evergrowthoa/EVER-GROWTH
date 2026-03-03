@@ -4,14 +4,11 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 import time
-#<<<<<<< HEAD
 import re
 import threading
 import queue
 
 import uiautomator2 as u2
-#=======
-#>>>>>>> f29392a170b3c55d41d840ed74949ffb129536d1
 
 # ===========================
 # 로그인 정보
@@ -20,15 +17,12 @@ USER_ID = "evergrowth"
 USER_PW = "wkrlfjqm1!"
 
 # ===========================
-#<<<<<<< HEAD
 # 에뮬레이터 설정
 # ===========================
-ADB_SERIAL = "emulator-5554"   # adb devices에서 보이는 값으로 바꾸세요
-DO_EMULATOR = True            # 에뮬레이터 자동화를 잠깐 끄고 싶으면 False
+ADB_SERIAL = "emulator-5554"
+DO_EMULATOR = True
 
 # ===========================
-#=======
-#>>>>>>> f29392a170b3c55d41d840ed74949ffb129536d1
 # 크롬 옵션
 # ===========================
 chrome_options = Options()
@@ -39,80 +33,188 @@ driver = webdriver.Chrome(options=chrome_options)
 wait = WebDriverWait(driver, 20)
 
 # ===========================
-#<<<<<<< HEAD
 # 작업 큐 (웹 → 에뮬레이터)
 # ===========================
 job_q = queue.Queue()
 
-def normalize_phone(s: str) -> str:
-    if s is None:
-        return ""
-    digits = re.sub(r"\D", "", str(s))
-    return digits
 
+# ===========================
+# 유틸: 문자열/속성
+# ===========================
+def _attr(el, key: str) -> str:
+    return (el.get_attribute(key) or "").strip()
+
+
+def _meta(el) -> str:
+    return " ".join([
+        _attr(el, "id"),
+        _attr(el, "name"),
+        _attr(el, "placeholder"),
+        _attr(el, "aria-label"),
+        _attr(el, "class"),
+        _attr(el, "type"),
+        _attr(el, "inputmode"),
+        _attr(el, "autocomplete"),
+    ]).lower()
+
+
+def normalize_digits(s: str) -> str:
+    return re.sub(r"\D", "", str(s or ""))
+
+
+def normalize_phone11_only_010(s: str) -> str:
+    digits = normalize_digits(s)
+
+    # +82 10xxxxxxxx 형태 보정(혹시 몰라서)
+    if digits.startswith("82") and len(digits) >= 12 and digits[2:4] == "10":
+        digits = "0" + digits[2:]
+
+    # 우리 플로우는 010 11자리만
+    if digits.startswith("010") and len(digits) == 11:
+        return digits
+    return ""
+
+
+def is_accountish_value(v: str) -> bool:
+    v = str(v or "")
+    if any(k in v for k in ["계좌", "은행", "뱅크", "카카오", "신한", "국민", "우리", "하나", "/"]):
+        return True
+    return False
+
+
+def has_phone_hint(meta: str) -> bool:
+    return any(k in meta for k in ["phone", "tel", "mobile", "휴대", "연락", "핸드폰", "휴대폰", "11자리"])
+
+
+# ===========================
+# 모달 값 추출(인덱스 의존 제거)
+# ===========================
+def pick_name_from_inputs(inputs) -> str:
+    for el in inputs:
+        v = (_attr(el, "value") or "").strip()
+        if re.fullmatch(r"[가-힣]{2,6}", v):
+            return v
+    return ""
+
+
+def pick_birth_from_inputs(inputs) -> str:
+    for el in inputs:
+        v = (_attr(el, "value") or "").strip()
+        if re.fullmatch(r"\d{6}-\d{1}", v):
+            return v
+        v2 = normalize_digits(v)
+        if re.fullmatch(r"\d{7}", v2):
+            return v
+    return ""
+
+
+def pick_zip_from_inputs(inputs) -> str:
+    for el in inputs:
+        v = (_attr(el, "value") or "").strip()
+        if re.fullmatch(r"\d{5}", v):
+            return v
+    return ""
+
+
+def pick_account_from_inputs(inputs) -> str:
+    for el in inputs:
+        v = (_attr(el, "value") or "").strip()
+        meta = _meta(el)
+        if any(k in meta for k in ["account", "acct", "bank", "계좌", "은행", "뱅크"]) or is_accountish_value(v):
+            if v:
+                return v
+    return ""
+
+
+def pick_phone11_from_inputs(inputs):
+    """
+    핵심: 숫자 패턴으로만 찾지 않고,
+    '휴대폰 필드 힌트(placeholder/id/name/type/...)'가 있는 input에서만 phone을 추출한다.
+    """
+    best_score = -10**9
+    best_phone11 = ""
+    best_raw = ""
+
+    for el in inputs:
+        raw = (_attr(el, "value") or "").strip()
+        if not raw:
+            continue
+
+        meta = _meta(el)
+
+        # 계좌/은행 쪽 힌트면 애초에 제외
+        if any(k in meta for k in ["account", "acct", "bank", "계좌", "은행", "뱅크"]) or is_accountish_value(raw):
+            continue
+
+        phone11 = normalize_phone11_only_010(raw)
+        if not phone11:
+            continue
+
+        # ✅ 휴대폰 필드 힌트가 없는 값은 후보에서 제외 (010 계좌/숫자 오인 방지)
+        if not has_phone_hint(meta):
+            continue
+
+        score = 0
+        score += 100  # 힌트 기반 필드라는 자체가 큰 가점
+
+        if "tel" in meta:
+            score += 30
+        if "010" in phone11:
+            score += 10
+        if "-" in raw:
+            score += 3
+
+        if score > best_score:
+            best_score = score
+            best_phone11 = phone11
+            best_raw = raw
+
+    return best_phone11, best_raw
+
+
+# ===========================
+# 에뮬레이터 제어
+# ===========================
 def connect_emulator():
     d = u2.connect(ADB_SERIAL)
     d.implicitly_wait(5.0)
     return d
 
+
 def ensure_on_mobile_order_home(d):
-    # ✅ 화면을 "건드리지 않고" 확인만 한다 (뒤로가기 없음)
-    if d(text="일반 주문하기").exists:
-        return True
+    # ✅ 화면을 "절대 건드리지 않고", '일반 주문하기'가 보일 때만 True
+    return d(text="일반 주문하기").exists
 
-    # 하단 탭 "모바일 주문"이 보이면 1회만 눌러본다
-    if d(text="모바일 주문").exists:
-        d(text="모바일 주문").click()
-        time.sleep(0.8)
-        if d(text="일반 주문하기").exists:
-            return True
-
-    return False
 
 def send_auth_request(d, name: str, phone11: str) -> bool:
-    # 3번 화면(주문접수 1/6)까지 진입 후
-    # 개인 클릭 → 고객명 입력 → 휴대폰 입력 → 본인인증 요청 클릭
-
     if not ensure_on_mobile_order_home(d):
-        print("❌ 에뮬레이터: 홈(모바일 주문) 화면을 찾지 못했습니다.")
-        return False
-
-    if not d(text="일반 주문하기").exists:
-        print("❌ 에뮬레이터: '일반 주문하기' 버튼이 없습니다.")
+        print("❌ 에뮬레이터: '일반 주문하기'가 보이는 화면이 아닙니다. (화면 전환 안 함)")
         return False
 
     d(text="일반 주문하기").click()
     time.sleep(0.8)
 
-    # 주문접수 화면 확인(상단 텍스트로 가볍게 체크)
-    if not d(text="주문접수").exists:
-        # 기기/앱에 따라 상단 텍스트가 다를 수 있어서, 다음 요소로도 체크
-        if not d(text="본인인증 요청").exists:
-            print("❌ 에뮬레이터: 주문접수(고객정보 입력) 화면이 아닙니다.")
-            return False
+    if not d(text="주문접수").exists and not d(text="본인인증 요청").exists:
+        print("❌ 에뮬레이터: 주문접수(고객정보 입력) 화면이 아닙니다.")
+        return False
 
-    # 고객 구분: 개인
     if d(text="개인").exists:
         d(text="개인").click()
-        time.sleep(0.3)
+        time.sleep(0.2)
 
-    # 입력칸 2개: 보통 첫번째=고객명, 두번째=휴대폰
     edits = d(className="android.widget.EditText")
     if edits.count < 2:
         print("❌ 에뮬레이터: 입력칸(EditText)이 2개가 아닙니다.")
         return False
 
-    # 고객명 입력
     edits[0].click()
     time.sleep(0.1)
     edits[0].set_text(name)
 
-    # 휴대폰 입력(11자리)
     edits[1].click()
     time.sleep(0.1)
     edits[1].set_text(phone11)
 
-    # 본인인증 요청 버튼이 활성화될 때까지 잠깐 대기 후 클릭
     btn = d(text="본인인증 요청")
     for _ in range(20):
         if btn.exists and btn.info.get("enabled", False):
@@ -122,7 +224,6 @@ def send_auth_request(d, name: str, phone11: str) -> bool:
             return True
         time.sleep(0.2)
 
-    # enabled 확인이 기기별로 안 잡히는 경우가 있어서, 마지막으로 그냥 클릭 1회 시도
     if btn.exists:
         btn.click()
         time.sleep(0.8)
@@ -131,6 +232,7 @@ def send_auth_request(d, name: str, phone11: str) -> bool:
 
     print("❌ 에뮬레이터: '본인인증 요청' 버튼을 찾지 못했습니다.")
     return False
+
 
 def emulator_worker():
     if not DO_EMULATOR:
@@ -160,12 +262,12 @@ def emulator_worker():
         finally:
             job_q.task_done()
 
-# 워커 스레드 시작
+
 t = threading.Thread(target=emulator_worker, daemon=True)
 t.start()
 
-# ==================================
-#>>>>>>> f29392a170b3c55d41d840ed74949ffb129536d1
+
+# ===========================
 # 1. 사이트 접속
 # ===========================
 driver.get("https://allnup.com")
@@ -207,80 +309,38 @@ processed_phones = set()
 # ===========================
 while True:
     try:
-#<<<<<<< HEAD
-        # 화면에 보이는 input만 대상으로 하면 index가 덜 흔들립니다.
         all_inputs = driver.find_elements(By.TAG_NAME, "input")
         inputs = [x for x in all_inputs if x.is_displayed()]
 
-        # 모달이 열렸을 때 (input이 많아짐)
         if len(inputs) > 15:
-            name = (inputs[10].get_attribute("value") or "").strip()
-            birth = (inputs[11].get_attribute("value") or "").strip()
-            phone_raw = (inputs[12].get_attribute("value") or "").strip()
-            account = (inputs[13].get_attribute("value") or "").strip()
-            zipcode = (inputs[14].get_attribute("value") or "").strip()
+            name = pick_name_from_inputs(inputs)
+            birth = pick_birth_from_inputs(inputs)
+            account = pick_account_from_inputs(inputs)
+            zipcode = pick_zip_from_inputs(inputs)
 
-            phone_digits = normalize_phone(phone_raw)
+            phone11, phone_raw = pick_phone11_from_inputs(inputs)
 
-            # 전화번호 없으면 무시 (빈 모달 방지)
-            if not phone_digits:
-                time.sleep(0.5)
-                continue
-
-            # 11자리만 사용(앞자리 0 포함)
-            if len(phone_digits) >= 11:
-                phone11 = phone_digits[-11:]
-            else:
-                print(f"❌ 전화번호가 11자리가 아닙니다: {phone_raw}")
+            # ✅ 휴대폰을 못 찾으면 "오인 방지"를 위해 스킵 (중요)
+            if not phone11:
+                print("❌ 전화번호(휴대폰 필드) 추출 실패 → 오인 방지로 건너뜀")
                 time.sleep(0.8)
                 continue
 
-            # 이미 처리한 번호면 스킵
             if phone11 in processed_phones:
-                time.sleep(1)
+                time.sleep(0.8)
                 continue
 
             processed_phones.add(phone11)
-#=======
-        inputs = driver.find_elements(By.TAG_NAME, "input")
-
-        # 모달이 열렸을 때 (input이 많아짐)
-        if len(inputs) > 15:
-
-            name = inputs[10].get_attribute("value")
-            birth = inputs[11].get_attribute("value")
-            phone = inputs[12].get_attribute("value")
-            account = inputs[13].get_attribute("value")
-            zipcode = inputs[14].get_attribute("value")
-
-            # 📌 전화번호 없으면 무시 (빈 모달 방지)
-            if not phone or not phone.strip():
-                time.sleep(0.5)
-                continue
-
-            # 📌 이미 처리한 번호면 스킵
-            if phone in processed_phones:
-                time.sleep(1)
-                continue
-
-            # 신규 고객 저장
-            processed_phones.add(phone)
-#>>>>>>> f29392a170b3c55d41d840ed74949ffb129536d1
 
             print("\n✅ 신규 고객 감지")
             print("이름:", name)
             print("생년월일:", birth)
-#<<<<<<< HEAD
             print("전화번호(11):", phone11)
-#=======
-            print("전화번호:", phone)
-#>>>>>>> f29392a170b3c55d41d840ed74949ffb129536d1
+            print("전화번호 원문:", phone_raw)
             print("계좌:", account)
             print("우편번호:", zipcode)
             print("-" * 40)
 
-#<<<<<<< HEAD
-            # 에뮬레이터 작업 큐에 전달
             job_q.put({
                 "name": name,
                 "phone11": phone11,
@@ -290,10 +350,6 @@ while True:
             })
 
             time.sleep(1.2)
-#=======
-            time.sleep(2)
-#>>>>>>> f29392a170b3c55d41d840ed74949ffb129536d1
-
         else:
             time.sleep(0.5)
 
