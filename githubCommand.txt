@@ -1,0 +1,49 @@
+Git 사용자 설정 (최초 1회만)
+
+⚠️ 이건 무조건 한 번만 하면 됨
+
+git config --global user.name "네 이름"
+git config --global user.email "네 깃허브이메일"
+
+예:
+git config --global user.name "evergrowthoa"
+git config --global user.email "example@gmail.com"
+==============================================
+프로젝트 처음 가져오기 (클론)
+📌 원하는 위치로 이동
+
+예: 바탕화면
+
+cd Desktop
+
+또는 정확하게:
+
+cd C:\Users\사용자이름\Desktop
+📌 깃허브 프로젝트 복사 (최초 1회)
+git clone https://github.com/evergrowthoa/EVER-GROWTH.git
+
+설명:
+
+clone = 깃허브 프로젝트를 통째로 복사
+
+자동으로 EVER-GROWTH 폴더 생성됨
+===============================================
+앞으로 자주 쓰는 Git 명령어 정리
+🔹 현재 상태 확인
+git status
+🔹 변경 파일 추가
+git add .
+🔹 커밋
+git commit -m "설명 적기"
+🔹 깃허브로 올리기
+git push origin main
+🔹 다른 PC에서 최신버전 가져오기
+git pull origin main
+===============================================
+작업 기본 루틴 (앞으로 계속 쓰는 패턴)
+📌 코드 수정 후
+git add .
+git commit -m "수정 내용"
+git push origin main
+📌 다른 PC에서 작업 시작할 때
+git pull origin main
