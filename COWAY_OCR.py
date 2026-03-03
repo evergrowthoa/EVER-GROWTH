@@ -19,8 +19,8 @@ USER_PW = "wkrlfjqm1!"
 # ===========================
 # 에뮬레이터 설정
 # ===========================
-ADB_SERIAL = "emulator-5554"
-DO_EMULATOR = True
+ADB_SERIAL = "emulator-5554"   # adb devices에서 보이는 값
+DO_EMULATOR = True            # 테스트로 에뮬레이터 끄려면 False
 
 # ===========================
 # 크롬 옵션
@@ -37,140 +37,144 @@ wait = WebDriverWait(driver, 20)
 # ===========================
 job_q = queue.Queue()
 
-
 # ===========================
-# 유틸: 문자열/속성
+# 공통 유틸
 # ===========================
-def _attr(el, key: str) -> str:
-    return (el.get_attribute(key) or "").strip()
-
-
-def _meta(el) -> str:
-    return " ".join([
-        _attr(el, "id"),
-        _attr(el, "name"),
-        _attr(el, "placeholder"),
-        _attr(el, "aria-label"),
-        _attr(el, "class"),
-        _attr(el, "type"),
-        _attr(el, "inputmode"),
-        _attr(el, "autocomplete"),
-    ]).lower()
-
-
 def normalize_digits(s: str) -> str:
     return re.sub(r"\D", "", str(s or ""))
-
 
 def normalize_phone11_only_010(s: str) -> str:
     digits = normalize_digits(s)
 
-    # +82 10xxxxxxxx 형태 보정(혹시 몰라서)
+    # +82 10xxxxxxxx → 010xxxxxxxx 보정(혹시)
     if digits.startswith("82") and len(digits) >= 12 and digits[2:4] == "10":
         digits = "0" + digits[2:]
 
-    # 우리 플로우는 010 11자리만
-    if digits.startswith("010") and len(digits) == 11:
+    # 여기서는 010 11자리만 유효
+    if len(digits) == 11 and digits.startswith("010"):
         return digits
     return ""
 
-
-def is_accountish_value(v: str) -> bool:
-    v = str(v or "")
-    if any(k in v for k in ["계좌", "은행", "뱅크", "카카오", "신한", "국민", "우리", "하나", "/"]):
-        return True
-    return False
-
-
-def has_phone_hint(meta: str) -> bool:
-    return any(k in meta for k in ["phone", "tel", "mobile", "휴대", "연락", "핸드폰", "휴대폰", "11자리"])
-
-
 # ===========================
-# 모달 값 추출(인덱스 의존 제거)
+# 모달(라벨 기반) 값 추출
 # ===========================
-def pick_name_from_inputs(inputs) -> str:
-    for el in inputs:
-        v = (_attr(el, "value") or "").strip()
-        if re.fullmatch(r"[가-힣]{2,6}", v):
-            return v
-    return ""
+DEBUG_MODAL_ON_FAIL = True
+_last_debug_ts = 0.0
 
+def find_open_modal():
+    # 모달이 부트스트랩 계열이라면 아래 셀렉터 중 하나로 잡힘
+    selectors = [
+        ".modal.show",
+        ".modal.in",
+        ".modal[style*='display: block']",
+        ".modal[style*='display:block']",
+    ]
+    for sel in selectors:
+        ms = driver.find_elements(By.CSS_SELECTOR, sel)
+        for m in ms:
+            try:
+                if m.is_displayed():
+                    return m
+            except Exception:
+                continue
+    return None
 
-def pick_birth_from_inputs(inputs) -> str:
-    for el in inputs:
-        v = (_attr(el, "value") or "").strip()
-        if re.fullmatch(r"\d{6}-\d{1}", v):
-            return v
-        v2 = normalize_digits(v)
-        if re.fullmatch(r"\d{7}", v2):
-            return v
-    return ""
-
-
-def pick_zip_from_inputs(inputs) -> str:
-    for el in inputs:
-        v = (_attr(el, "value") or "").strip()
-        if re.fullmatch(r"\d{5}", v):
-            return v
-    return ""
-
-
-def pick_account_from_inputs(inputs) -> str:
-    for el in inputs:
-        v = (_attr(el, "value") or "").strip()
-        meta = _meta(el)
-        if any(k in meta for k in ["account", "acct", "bank", "계좌", "은행", "뱅크"]) or is_accountish_value(v):
-            if v:
-                return v
-    return ""
-
-
-def pick_phone11_from_inputs(inputs):
+def find_input_near_label(modal, label_keywords):
     """
-    핵심: 숫자 패턴으로만 찾지 않고,
-    '휴대폰 필드 힌트(placeholder/id/name/type/...)'가 있는 input에서만 phone을 추출한다.
+    label_keywords(예: ["연락처","휴대폰"]) 중 하나를 포함하는 텍스트를 찾고,
+    그 주변(같은 영역)에서 가장 가까운 input을 찾아 value를 반환.
     """
-    best_score = -10**9
-    best_phone11 = ""
-    best_raw = ""
+    # 1) (가장 흔함) 라벨 텍스트 뒤에 바로 input이 오는 케이스
+    for kw in label_keywords:
+        xpaths = [
+            f".//label[contains(normalize-space(.), '{kw}')]/following::input[not(@type='hidden')][1]",
+            f".//*[contains(normalize-space(.), '{kw}')]/following::input[not(@type='hidden')][1]",
+            f".//tr[.//*[contains(normalize-space(.), '{kw}')]]//input[not(@type='hidden')][1]",
+        ]
+        for xp in xpaths:
+            try:
+                el = modal.find_element(By.XPATH, xp)
+                if el and el.is_displayed():
+                    v = (el.get_attribute("value") or "").strip()
+                    if v:
+                        return v
+            except Exception:
+                pass
 
-    for el in inputs:
-        raw = (_attr(el, "value") or "").strip()
-        if not raw:
+    # 2) 같은 “행/그룹” 안에서 input 찾기(조금 더 안전)
+    for kw in label_keywords:
+        try:
+            label_el = modal.find_element(By.XPATH, f".//*[contains(normalize-space(.), '{kw}')]")
+        except Exception:
             continue
 
-        meta = _meta(el)
+        try:
+            container = label_el.find_element(
+                By.XPATH,
+                "./ancestor::*[contains(@class,'form-group') or contains(@class,'row') or contains(@class,'col') or self::tr][1]"
+            )
+            cand = container.find_elements(By.XPATH, ".//input[not(@type='hidden')]")
+            for el in cand:
+                try:
+                    if el.is_displayed():
+                        v = (el.get_attribute("value") or "").strip()
+                        if v:
+                            return v
+                except Exception:
+                    continue
+        except Exception:
+            pass
 
-        # 계좌/은행 쪽 힌트면 애초에 제외
-        if any(k in meta for k in ["account", "acct", "bank", "계좌", "은행", "뱅크"]) or is_accountish_value(raw):
-            continue
+    return ""
 
-        phone11 = normalize_phone11_only_010(raw)
-        if not phone11:
-            continue
+def debug_modal_inputs(modal):
+    global _last_debug_ts
+    now = time.time()
+    if not DEBUG_MODAL_ON_FAIL:
+        return
+    if now - _last_debug_ts < 2.0:
+        return
+    _last_debug_ts = now
 
-        # ✅ 휴대폰 필드 힌트가 없는 값은 후보에서 제외 (010 계좌/숫자 오인 방지)
-        if not has_phone_hint(meta):
-            continue
+    print("----- [DEBUG] 모달 input 목록(앞 40개) -----")
+    try:
+        els = modal.find_elements(By.CSS_SELECTOR, "input")
+        for i, el in enumerate(els[:40]):
+            try:
+                if not el.is_displayed():
+                    continue
+                v = (el.get_attribute("value") or "").strip()
+                if not v:
+                    continue
+                _id = (el.get_attribute("id") or "").strip()
+                _name = (el.get_attribute("name") or "").strip()
+                _ph = (el.get_attribute("placeholder") or "").strip()
+                _type = (el.get_attribute("type") or "").strip()
+                print(f"[{i}] type={_type} id={_id} name={_name} placeholder={_ph} value={v}")
+            except Exception:
+                continue
+    except Exception as e:
+        print("DEBUG 실패:", e)
+    print("----- [DEBUG] 끝 -----")
 
-        score = 0
-        score += 100  # 힌트 기반 필드라는 자체가 큰 가점
+def extract_fields_from_modal(modal):
+    # 라벨 기반으로 최대한 정확히 찾기
+    name = find_input_near_label(modal, ["고객명", "이름", "성명"])
+    birth = find_input_near_label(modal, ["생년월일", "주민", "생년"])
+    phone_raw = find_input_near_label(modal, ["연락처", "휴대폰번호", "휴대폰", "전화번호", "전화"])
+    account = find_input_near_label(modal, ["계좌", "은행", "계좌번호", "결제정보", "결제"])
+    zipcode = find_input_near_label(modal, ["우편번호", "우편", "ZIP", "postcode"])
 
-        if "tel" in meta:
-            score += 30
-        if "010" in phone11:
-            score += 10
-        if "-" in raw:
-            score += 3
+    phone11 = normalize_phone11_only_010(phone_raw)
 
-        if score > best_score:
-            best_score = score
-            best_phone11 = phone11
-            best_raw = raw
-
-    return best_phone11, best_raw
-
+    return {
+        "name": name,
+        "birth": birth,
+        "phone_raw": phone_raw,
+        "phone11": phone11,
+        "account": account,
+        "zipcode": zipcode,
+    }
 
 # ===========================
 # 에뮬레이터 제어
@@ -180,11 +184,9 @@ def connect_emulator():
     d.implicitly_wait(5.0)
     return d
 
-
 def ensure_on_mobile_order_home(d):
-    # ✅ 화면을 "절대 건드리지 않고", '일반 주문하기'가 보일 때만 True
+    # ✅ 화면을 건드리지 않고 확인만
     return d(text="일반 주문하기").exists
-
 
 def send_auth_request(d, name: str, phone11: str) -> bool:
     if not ensure_on_mobile_order_home(d):
@@ -216,23 +218,60 @@ def send_auth_request(d, name: str, phone11: str) -> bool:
     edits[1].set_text(phone11)
 
     btn = d(text="본인인증 요청")
+
+    clicked_auth = False
     for _ in range(20):
         if btn.exists and btn.info.get("enabled", False):
             btn.click()
-            time.sleep(0.8)
+            time.sleep(0.6)
             print("✅ 에뮬레이터: 본인인증 요청 클릭 완료")
-            return True
+            clicked_auth = True
+            break
         time.sleep(0.2)
 
-    if btn.exists:
-        btn.click()
-        time.sleep(0.8)
-        print("✅ 에뮬레이터: 본인인증 요청 클릭(강제) 시도 완료")
-        return True
+    if not clicked_auth:
+        if btn.exists:
+            btn.click()
+            time.sleep(0.6)
+            print("✅ 에뮬레이터: 본인인증 요청 클릭(강제) 시도 완료")
+            clicked_auth = True
 
-    print("❌ 에뮬레이터: '본인인증 요청' 버튼을 찾지 못했습니다.")
-    return False
+    if not clicked_auth:
+        print("❌ 에뮬레이터: '본인인증 요청' 버튼을 찾지 못했습니다.")
+        return False
 
+    # ✅ 확인 팝업이 뜨면 [발송]까지 자동 클릭
+    # 팝업이 안 뜨는 환경도 있으니: "있으면 누른다" 방식으로 안전하게 처리
+    send_clicked = False
+    for _ in range(40):
+        title_ok = d(textContains="메시지를 발송").exists or d(textContains="고객인증").exists
+        if title_ok and d(text="발송").exists:
+            d(text="발송").click()
+            time.sleep(0.6)
+            print("✅ 에뮬레이터: 확인 팝업 [발송] 클릭 완료")
+            send_clicked = True
+            break
+        time.sleep(0.2)
+
+    # 팝업 타이틀을 못 잡는 기기 대비(타이틀 없이 버튼만 잡히는 경우)
+    if not send_clicked:
+        for _ in range(10):
+            if d(text="발송").exists:
+                d(text="발송").click()
+                time.sleep(0.6)
+                print("✅ 에뮬레이터: [발송] 클릭(타이틀 미확인) 완료")
+                send_clicked = True
+                break
+            time.sleep(0.2)
+
+    # 팝업이 있었으면 닫힐 때까지 짧게 대기(중복 클릭 방지)
+    if send_clicked:
+        for _ in range(20):
+            if not d(text="발송").exists:
+                break
+            time.sleep(0.2)
+
+    return True
 
 def emulator_worker():
     if not DO_EMULATOR:
@@ -262,10 +301,8 @@ def emulator_worker():
         finally:
             job_q.task_done()
 
-
 t = threading.Thread(target=emulator_worker, daemon=True)
 t.start()
-
 
 # ===========================
 # 1. 사이트 접속
@@ -309,49 +346,51 @@ processed_phones = set()
 # ===========================
 while True:
     try:
-        all_inputs = driver.find_elements(By.TAG_NAME, "input")
-        inputs = [x for x in all_inputs if x.is_displayed()]
-
-        if len(inputs) > 15:
-            name = pick_name_from_inputs(inputs)
-            birth = pick_birth_from_inputs(inputs)
-            account = pick_account_from_inputs(inputs)
-            zipcode = pick_zip_from_inputs(inputs)
-
-            phone11, phone_raw = pick_phone11_from_inputs(inputs)
-
-            # ✅ 휴대폰을 못 찾으면 "오인 방지"를 위해 스킵 (중요)
-            if not phone11:
-                print("❌ 전화번호(휴대폰 필드) 추출 실패 → 오인 방지로 건너뜀")
-                time.sleep(0.8)
-                continue
-
-            if phone11 in processed_phones:
-                time.sleep(0.8)
-                continue
-
-            processed_phones.add(phone11)
-
-            print("\n✅ 신규 고객 감지")
-            print("이름:", name)
-            print("생년월일:", birth)
-            print("전화번호(11):", phone11)
-            print("전화번호 원문:", phone_raw)
-            print("계좌:", account)
-            print("우편번호:", zipcode)
-            print("-" * 40)
-
-            job_q.put({
-                "name": name,
-                "phone11": phone11,
-                "birth": birth,
-                "account": account,
-                "zipcode": zipcode,
-            })
-
-            time.sleep(1.2)
-        else:
+        modal = find_open_modal()
+        if not modal:
             time.sleep(0.5)
+            continue
+
+        data = extract_fields_from_modal(modal)
+
+        name = (data.get("name") or "").strip()
+        birth = (data.get("birth") or "").strip()
+        phone_raw = (data.get("phone_raw") or "").strip()
+        phone11 = (data.get("phone11") or "").strip()
+        account = (data.get("account") or "").strip()
+        zipcode = (data.get("zipcode") or "").strip()
+
+        # ✅ 전화번호(라벨 기반) 추출 실패 시: 오인 방지로 스킵 + 디버그 출력
+        if not phone11:
+            print("❌ 전화번호(라벨 기반) 추출 실패 → 오인 방지로 건너뜀")
+            debug_modal_inputs(modal)
+            time.sleep(0.8)
+            continue
+
+        if phone11 in processed_phones:
+            time.sleep(0.8)
+            continue
+
+        processed_phones.add(phone11)
+
+        print("\n✅ 신규 고객 감지")
+        print("이름:", name)
+        print("생년월일:", birth)
+        print("전화번호(11):", phone11)
+        print("전화번호 원문:", phone_raw)
+        print("계좌:", account)
+        print("우편번호:", zipcode)
+        print("-" * 40)
+
+        job_q.put({
+            "name": name,
+            "phone11": phone11,
+            "birth": birth,
+            "account": account,
+            "zipcode": zipcode,
+        })
+
+        time.sleep(1.2)
 
     except Exception as e:
         print("에러 발생:", e)
