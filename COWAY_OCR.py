@@ -4,14 +4,14 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 import time
-<<<<<<< HEAD
+#<<<<<<< HEAD
 import re
 import threading
 import queue
 
 import uiautomator2 as u2
-=======
->>>>>>> f29392a170b3c55d41d840ed74949ffb129536d1
+#=======
+#>>>>>>> f29392a170b3c55d41d840ed74949ffb129536d1
 
 # ===========================
 # 로그인 정보
@@ -20,15 +20,15 @@ USER_ID = "evergrowth"
 USER_PW = "wkrlfjqm1!"
 
 # ===========================
-<<<<<<< HEAD
+#<<<<<<< HEAD
 # 에뮬레이터 설정
 # ===========================
 ADB_SERIAL = "emulator-5554"   # adb devices에서 보이는 값으로 바꾸세요
 DO_EMULATOR = True            # 에뮬레이터 자동화를 잠깐 끄고 싶으면 False
 
 # ===========================
-=======
->>>>>>> f29392a170b3c55d41d840ed74949ffb129536d1
+#=======
+#>>>>>>> f29392a170b3c55d41d840ed74949ffb129536d1
 # 크롬 옵션
 # ===========================
 chrome_options = Options()
@@ -39,7 +39,7 @@ driver = webdriver.Chrome(options=chrome_options)
 wait = WebDriverWait(driver, 20)
 
 # ===========================
-<<<<<<< HEAD
+#<<<<<<< HEAD
 # 작업 큐 (웹 → 에뮬레이터)
 # ===========================
 job_q = queue.Queue()
@@ -56,22 +56,18 @@ def connect_emulator():
     return d
 
 def ensure_on_mobile_order_home(d):
-    # 1번 홈 화면(모바일 주문 탭) 기준으로 맞추는 용도
-    # 화면이 어디에 있든, 뒤로가기를 몇 번 누르고 "일반 주문하기"가 보이면 성공으로 처리
-    for _ in range(6):
-        if d(text="일반 주문하기").exists:
-            return True
-        d.press("back")
-        time.sleep(0.6)
+    # ✅ 화면을 "건드리지 않고" 확인만 한다 (뒤로가기 없음)
+    if d(text="일반 주문하기").exists:
+        return True
 
-    # 그래도 못 찾으면, 하단 탭의 "모바일 주문"을 눌러서 진입 시도
+    # 하단 탭 "모바일 주문"이 보이면 1회만 눌러본다
     if d(text="모바일 주문").exists:
         d(text="모바일 주문").click()
         time.sleep(0.8)
         if d(text="일반 주문하기").exists:
             return True
 
-    return d(text="일반 주문하기").exists
+    return False
 
 def send_auth_request(d, name: str, phone11: str) -> bool:
     # 3번 화면(주문접수 1/6)까지 진입 후
@@ -168,9 +164,8 @@ def emulator_worker():
 t = threading.Thread(target=emulator_worker, daemon=True)
 t.start()
 
-# ===========================
-=======
->>>>>>> f29392a170b3c55d41d840ed74949ffb129536d1
+# ==================================
+#>>>>>>> f29392a170b3c55d41d840ed74949ffb129536d1
 # 1. 사이트 접속
 # ===========================
 driver.get("https://allnup.com")
@@ -212,7 +207,7 @@ processed_phones = set()
 # ===========================
 while True:
     try:
-<<<<<<< HEAD
+#<<<<<<< HEAD
         # 화면에 보이는 input만 대상으로 하면 index가 덜 흔들립니다.
         all_inputs = driver.find_elements(By.TAG_NAME, "input")
         inputs = [x for x in all_inputs if x.is_displayed()]
@@ -246,7 +241,7 @@ while True:
                 continue
 
             processed_phones.add(phone11)
-=======
+#=======
         inputs = driver.find_elements(By.TAG_NAME, "input")
 
         # 모달이 열렸을 때 (input이 많아짐)
@@ -270,21 +265,21 @@ while True:
 
             # 신규 고객 저장
             processed_phones.add(phone)
->>>>>>> f29392a170b3c55d41d840ed74949ffb129536d1
+#>>>>>>> f29392a170b3c55d41d840ed74949ffb129536d1
 
             print("\n✅ 신규 고객 감지")
             print("이름:", name)
             print("생년월일:", birth)
-<<<<<<< HEAD
+#<<<<<<< HEAD
             print("전화번호(11):", phone11)
-=======
+#=======
             print("전화번호:", phone)
->>>>>>> f29392a170b3c55d41d840ed74949ffb129536d1
+#>>>>>>> f29392a170b3c55d41d840ed74949ffb129536d1
             print("계좌:", account)
             print("우편번호:", zipcode)
             print("-" * 40)
 
-<<<<<<< HEAD
+#<<<<<<< HEAD
             # 에뮬레이터 작업 큐에 전달
             job_q.put({
                 "name": name,
@@ -295,9 +290,9 @@ while True:
             })
 
             time.sleep(1.2)
-=======
+#=======
             time.sleep(2)
->>>>>>> f29392a170b3c55d41d840ed74949ffb129536d1
+#>>>>>>> f29392a170b3c55d41d840ed74949ffb129536d1
 
         else:
             time.sleep(0.5)
