@@ -24,10 +24,17 @@ ADB_SERIAL = "emulator-5554"   # adb devices에서 보이는 값
 DO_EMULATOR = True            # 테스트로 에뮬레이터 끄려면 False
 
 # ===========================
+# 디지털세일즈 앱 설정 (런처에서 앱 실행용)
+# ===========================
+DIGITAL_SALES_APP_NAME = "디지털세일즈"
+DIGITAL_SALES_PACKAGE = ""   # 패키지명 알면 넣으면 더 안정적 (모르면 빈칸 유지)
+
+# ===========================
 # 주기/안전 옵션
 # ===========================
 SIGN_SCAN_INTERVAL_SEC = 20    # 인증완료 스캔 주기(원하면 10~60)
 STOP_ON_ERROR = True           # 예상 밖 오류면 중단
+AUTH_RETRY_MAX = 5             # 화면 복구 실패 등 임시 실패 재시도 횟수
 
 # ===========================
 # 크롬 옵션
@@ -207,7 +214,88 @@ def connect_emulator():
     d.implicitly_wait(5.0)
     return d
 
-def ensure_on_mobile_order_home(d):
+def click_first_clickable_text(d, txt: str) -> bool:
+    try:
+        objs = d(text=txt).all()
+        for o in objs:
+            try:
+                info = o.info
+                if info.get("clickable", False):
+                    o.click()
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    if d(text=txt).exists:
+        try:
+            d(text=txt).click()
+            return True
+        except Exception:
+            return False
+
+    return False
+
+def open_digital_sales_app(d) -> bool:
+    # 이미 앱 내부(하단 탭이 보이면)면 True로 간주
+    if d(text="모바일 주문").exists or d(text="전체메뉴").exists or d(text="라이프스토리").exists:
+        return True
+
+    # 패키지명을 알면 이게 제일 안정적
+    if DIGITAL_SALES_PACKAGE:
+        try:
+            d.app_start(DIGITAL_SALES_PACKAGE)
+            time.sleep(2.0)
+            if d(text="모바일 주문").exists or d(text="전체메뉴").exists:
+                return True
+        except Exception:
+            pass
+
+    # 모르면 런처에서 아이콘(텍스트) 클릭
+    try:
+        d.press("home")
+        time.sleep(0.8)
+    except Exception:
+        pass
+
+    # 런처 아이콘 텍스트 클릭
+    if d(text=DIGITAL_SALES_APP_NAME).exists:
+        ok = click_first_clickable_text(d, DIGITAL_SALES_APP_NAME)
+        time.sleep(2.0)
+        return ok
+
+    return False
+
+def ensure_on_mobile_order_home(d) -> bool:
+    """
+    목표 화면: '모바일 주문' 화면(2번째 캡처)에서 '일반 주문하기'가 보이는 상태
+    - 런처(아이콘 화면)에서도 복구 가능
+    - 디지털세일즈 메인(공지/배너)에서도 '모바일 주문' 탭 눌러 복구 가능
+    """
+    for _ in range(3):
+        if d(text="일반 주문하기").exists:
+            return True
+
+        # 앱 내부라면 하단 탭 '모바일 주문'을 클릭(클릭 가능한 것만)
+        if d(text="모바일 주문").exists:
+            click_first_clickable_text(d, "모바일 주문")
+            time.sleep(1.0)
+            if d(text="일반 주문하기").exists:
+                return True
+
+        # 앱이 꺼져있거나 런처면 앱 실행 시도
+        opened = open_digital_sales_app(d)
+        if opened:
+            # 앱 열렸으면 다시 모바일 주문 탭 클릭
+            if d(text="모바일 주문").exists:
+                click_first_clickable_text(d, "모바일 주문")
+                time.sleep(1.0)
+                if d(text="일반 주문하기").exists:
+                    return True
+
+        time.sleep(0.5)
+
     return d(text="일반 주문하기").exists
 
 def ensure_on_order_status_screen(d):
@@ -215,31 +303,30 @@ def ensure_on_order_status_screen(d):
 
 def goto_order_status(d) -> bool:
     """
-    전자서명 스캔을 위해 주문현황 화면으로 이동
-    - 가능하면 건드리지 않고,
-    - 홈이면 '일반주문' 클릭으로 주문현황 진입 시도
+    주문현황으로 이동:
+    - 먼저 모바일 주문 홈으로 복구
+    - 모바일 주문 화면에서 '일반주문' 행을 눌러 주문현황 진입
     """
     if ensure_on_order_status_screen(d):
         return True
 
-    if ensure_on_mobile_order_home(d):
-        if d(text="일반주문").exists:
-            d(text="일반주문").click()
-            time.sleep(0.8)
-            return ensure_on_order_status_screen(d)
+    if not ensure_on_mobile_order_home(d):
+        return False
+
+    if d(text="일반주문").exists:
+        click_first_clickable_text(d, "일반주문")
+        time.sleep(0.8)
+        return ensure_on_order_status_screen(d)
 
     return False
 
 def try_click_auth_done_item(d) -> bool:
-    """
-    주문현황 리스트에서 '인증완료' 항목(핑크)을 하나 클릭해서 상세로 진입.
-    인증완료가 화면에 여러 개면 첫 번째만 클릭.
-    """
+    # 주문현황 리스트에서 '인증완료' 하나 클릭
     if not ensure_on_order_status_screen(d):
         return False
 
     if d(text="인증완료").exists:
-        d(text="인증완료").click()
+        click_first_clickable_text(d, "인증완료")
         time.sleep(0.8)
         return True
 
@@ -253,7 +340,7 @@ def match_detail_by_name_phone(d, name: str, phone11: str) -> bool:
 
 def click_order_continue(d) -> bool:
     if d(text="주문 이어서 하기").exists:
-        d(text="주문 이어서 하기").click()
+        click_first_clickable_text(d, "주문 이어서 하기")
         time.sleep(0.8)
         return True
     return False
@@ -266,29 +353,30 @@ def back_to_order_list(d) -> bool:
         time.sleep(0.5)
     return ensure_on_order_status_screen(d)
 
-def send_auth_request(d, name: str, phone11: str) -> bool:
+def send_auth_request(d, name: str, phone11: str):
     """
     인증발송(A)
+    return: (ok: bool, reason: str)
     """
     if not ensure_on_mobile_order_home(d):
-        print("❌ 에뮬레이터: '일반 주문하기' 화면이 아닙니다.")
-        return False
+        print("❌ 에뮬레이터: '모바일 주문(일반 주문하기)' 화면으로 복구 실패")
+        return (False, "NOT_READY")
 
-    d(text="일반 주문하기").click()
+    click_first_clickable_text(d, "일반 주문하기")
     time.sleep(0.8)
 
     if not d(text="주문접수").exists and not d(text="본인인증 요청").exists:
         print("❌ 에뮬레이터: 주문접수(고객정보 입력) 화면이 아닙니다.")
-        return False
+        return (False, "NOT_ORDER_FORM")
 
     if d(text="개인").exists:
-        d(text="개인").click()
+        click_first_clickable_text(d, "개인")
         time.sleep(0.2)
 
     edits = d(className="android.widget.EditText")
     if edits.count < 2:
         print("❌ 에뮬레이터: 입력칸(EditText)이 2개가 아닙니다.")
-        return False
+        return (False, "NO_EDITTEXT")
 
     edits[0].click()
     time.sleep(0.1)
@@ -318,13 +406,13 @@ def send_auth_request(d, name: str, phone11: str) -> bool:
 
     if not clicked_auth:
         print("❌ 에뮬레이터: '본인인증 요청' 버튼을 찾지 못했습니다.")
-        return False
+        return (False, "NO_AUTH_BTN")
 
     # 확인 팝업 [발송] 클릭
     send_clicked = False
     for _ in range(40):
         if d(text="발송").exists:
-            d(text="발송").click()
+            click_first_clickable_text(d, "발송")
             time.sleep(0.6)
             print("✅ 에뮬레이터: 확인 팝업 [발송] 클릭 완료")
             send_clicked = True
@@ -334,7 +422,7 @@ def send_auth_request(d, name: str, phone11: str) -> bool:
     if not send_clicked:
         print("⚠️ 에뮬레이터: [발송] 팝업이 안 보였음(환경 차이 가능)")
 
-    return True
+    return (True, "OK")
 
 def try_start_sign_flow(d) -> bool:
     """
@@ -377,9 +465,6 @@ def try_start_sign_flow(d) -> bool:
         sign_started.add(matched_phone)
 
     print(f"✅ 전자서명 플로우 진입(시작): {matched_name} / {matched_phone}")
-
-    # 여기서부터 제품/색상/약정/관리/전자서명발송 단계로 이어 붙이면 됨.
-    # 현재는 '주문 이어서 하기' 진입까지만 안전하게 처리.
     return True
 
 # ===========================
@@ -408,7 +493,7 @@ def emulator_main_loop():
                 last_sign_scan = now
                 try_start_sign_flow(d)
 
-            # 2) 전자서명 시작할 게 없을 때만 인증발송(A) 처리
+            # 2) 인증발송(A) 처리
             try:
                 job = auth_q.get_nowait()
             except queue.Empty:
@@ -418,17 +503,25 @@ def emulator_main_loop():
                 try:
                     name = job.get("name", "")
                     phone11 = job.get("phone11", "")
+                    retry = int(job.get("_retry", 0))
                     print(f"🚀 인증발송 작업 시작: {name} / {phone11}")
 
-                    ok = send_auth_request(d, name, phone11)
+                    ok, reason = send_auth_request(d, name, phone11)
                     if ok:
                         with jobs_lock:
                             auth_sent_jobs[phone11] = name
                         print(f"✅ 인증발송 성공: {name} / {phone11}")
                     else:
-                        print(f"❌ 인증발송 실패: {name} / {phone11}")
-                        if STOP_ON_ERROR:
-                            set_stop(f"인증발송 실패: {name}/{phone11}")
+                        # 화면 복구 실패 등은 재시도(중단하지 않음)
+                        if reason == "NOT_READY" and retry < AUTH_RETRY_MAX:
+                            retry += 1
+                            job["_retry"] = retry
+                            print(f"⚠️ 인증발송 재시도 예정 ({retry}/{AUTH_RETRY_MAX}) : {name} / {phone11}")
+                            auth_q.put(job)
+                        else:
+                            print(f"❌ 인증발송 실패: {name} / {phone11} (reason={reason})")
+                            if STOP_ON_ERROR:
+                                set_stop(f"인증발송 실패: {name}/{phone11} ({reason})")
 
                 finally:
                     auth_q.task_done()
@@ -532,6 +625,7 @@ while True:
             "birth": birth,
             "account": account,
             "zipcode": zipcode,
+            "_retry": 0,
         })
 
         time.sleep(1.2)
