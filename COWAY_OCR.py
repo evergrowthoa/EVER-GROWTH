@@ -244,7 +244,6 @@ def click_text_center(d, txt: str, y_min_ratio: float = 0.0, y_max_ratio: float 
     except Exception:
         pass
 
-    # 마지막 fallback
     try:
         if d(text=txt).exists:
             d(text=txt).click()
@@ -253,6 +252,57 @@ def click_text_center(d, txt: str, y_min_ratio: float = 0.0, y_max_ratio: float 
         return False
 
     return False
+
+def handle_exit_popup_cancel(d) -> bool:
+    """
+    '모바일 주문을 종료하시겠습니까?' 팝업이 뜨면 무조건 취소해서
+    작업이 끊기지 않게 막는다.
+    """
+    try:
+        if d(text="취소").exists and d(text="확인").exists and d(textContains="모바일 주문").exists and d(textContains="종료").exists:
+            click_text_center(d, "취소", 0.40, 0.98)
+            time.sleep(0.6)
+            return True
+    except Exception:
+        return False
+    return False
+
+def click_bottom_sheet_option(d, txt: str) -> bool:
+    """
+    진행상태 '하단 패널(바텀시트)' 안에 있는 옵션을 정확히 누르기.
+    - 같은 txt가 리스트에도 있을 수 있으니,
+      화면 아래쪽(하단 45% 이후)에 있는 txt만 클릭한다.
+    """
+    try:
+        w, h = d.window_size()
+        objs = d(text=txt).all()
+        best = None
+        best_top = 10**9
+
+        for o in objs:
+            try:
+                b = o.info.get("bounds", {})
+                top = int(b.get("top", 0))
+                if top < int(h * 0.45):
+                    continue
+                if top < best_top:
+                    best_top = top
+                    best = o
+            except Exception:
+                continue
+
+        if best is None:
+            return False
+
+        b = best.info.get("bounds", {})
+        cx = (int(b.get("left", 0)) + int(b.get("right", 0))) // 2
+        cy = (int(b.get("top", 0)) + int(b.get("bottom", 0))) // 2
+        d.click(cx, cy)
+        time.sleep(0.8)
+        return True
+
+    except Exception:
+        return False
 
 def open_digital_sales_app(d) -> bool:
     if d(text="모바일 주문").exists or d(text="전체메뉴").exists or d(text="라이프스토리").exists:
@@ -292,19 +342,17 @@ def ensure_on_mobile_order_home(d) -> bool:
         if d(text="주문현황").exists:
             try:
                 w, h = d.window_size()
-                d.click(int(w * 0.965), int(h * 0.075))  # 우측 상단 X
+                d.click(int(w * 0.965), int(h * 0.075))
                 time.sleep(0.3)
             except Exception:
                 pass
 
-            # 종료 팝업이면 확인
             for _ in range(10):
                 if d(text="확인").exists and d(text="취소").exists:
                     click_text_center(d, "확인", 0.45, 0.95)
                     time.sleep(0.8)
                     break
                 time.sleep(0.2)
-
             continue
 
         if d(text="확인").exists and d(text="취소").exists:
@@ -313,7 +361,7 @@ def ensure_on_mobile_order_home(d) -> bool:
             continue
 
         if d(text="모바일 주문").exists:
-            click_text_center(d, "모바일 주문", 0.70, 0.98)  # 하단 탭 영역
+            click_text_center(d, "모바일 주문", 0.70, 0.98)
             time.sleep(1.0)
             if d(text="일반 주문하기").exists:
                 return True
@@ -345,16 +393,20 @@ def goto_order_status(d) -> bool:
 
 def click_refresh_on_order_status(d) -> bool:
     """
-    우측 원형 새로고침 버튼은 텍스트가 없으니 좌표로 누른다(상대좌표).
+    우측 원형 새로고침 버튼은 텍스트가 없으니 좌표로 누른다.
+    (종료 팝업이 뜨면 무조건 취소)
     """
     try:
         if not d(text="주문현황").exists:
             return False
+
+        handle_exit_popup_cancel(d)
+
         w, h = d.window_size()
-        # 버튼 위치가 기기마다 조금 달라서 y를 3개로 시도
         for ry in (0.265, 0.285, 0.305):
             d.click(int(w * 0.955), int(h * ry))
-            time.sleep(0.5)
+            time.sleep(0.6)
+            handle_exit_popup_cancel(d)
             return True
     except Exception:
         return False
@@ -363,17 +415,19 @@ def click_refresh_on_order_status(d) -> bool:
 def ensure_filter_auth_done(d) -> bool:
     """
     ✅ 진행상태 필터 패널에서 '인증완료'를 반드시 선택.
-    (텍스트 클릭이 아니라 bounds 중앙 클릭으로 처리)
+    - back 사용 금지(종료 팝업 트리거)
+    - 하단 패널 영역의 '인증완료'만 클릭
+    - 패널 닫기는 상단 빈공간 클릭
     """
     if not ensure_on_order_status_screen(d):
         return False
 
-    # 1) 진행상태 버튼 열기
+    handle_exit_popup_cancel(d)
+
     if d(text="진행상태").exists:
         click_text_center(d, "진행상태", 0.20, 0.45)
         time.sleep(0.7)
     else:
-        # 진행상태 글자가 안 보이는 경우라도, 좌측 상단 칩 위치를 눌러 패널 열기
         try:
             w, h = d.window_size()
             d.click(int(w * 0.18), int(h * 0.335))
@@ -381,27 +435,24 @@ def ensure_filter_auth_done(d) -> bool:
         except Exception:
             return False
 
-    # 2) 하단 패널에서 인증완료 클릭 (패널은 화면 하단에 뜸)
     if not d(text="인증완료").exists:
         return False
 
-    click_text_center(d, "인증완료", 0.55, 0.98)
-    time.sleep(0.8)
+    ok = click_bottom_sheet_option(d, "인증완료")
+    if not ok:
+        return False
 
-    # 3) 패널이 남아있으면 한번 back으로 닫기
-    if d(text="전체보기").exists or d(text="인증입력").exists:
-        try:
-            d.press("back")
-            time.sleep(0.5)
-        except Exception:
-            pass
+    try:
+        w, h = d.window_size()
+        d.click(int(w * 0.50), int(h * 0.18))
+        time.sleep(0.4)
+    except Exception:
+        pass
 
+    handle_exit_popup_cancel(d)
     return True
 
 def click_auth_done_buttons_in_list(d):
-    """
-    인증완료 버튼들(리스트 영역)에 대한 객체들을 위에서부터 반환
-    """
     objs = []
     try:
         w, h = d.window_size()
@@ -409,7 +460,6 @@ def click_auth_done_buttons_in_list(d):
             try:
                 b = o.info.get("bounds", {})
                 top = int(b.get("top", 0))
-                # 리스트 영역만(상단 필터/검색 영역 제외)
                 if top >= int(h * 0.40):
                     objs.append((top, o))
             except Exception:
@@ -420,11 +470,6 @@ def click_auth_done_buttons_in_list(d):
     return [o for _, o in objs]
 
 def match_detail_by_name_phone_strict(d, name: str, phone11: str) -> bool:
-    """
-    ✅ 절대 실수 방지:
-    - name이 비어있거나 2글자 미만이면 무조건 False
-    - phone이 010-xxxx-xxxx 형태로 매칭될 때만 True
-    """
     if not name or len(name.strip()) < 2:
         return False
     phone_disp = phone11_to_display(phone11)
@@ -441,6 +486,7 @@ def back_to_order_list(d) -> bool:
         except Exception:
             pass
         time.sleep(0.5)
+        handle_exit_popup_cancel(d)
     return d(text="주문현황").exists
 
 def click_order_continue(d) -> bool:
@@ -451,10 +497,6 @@ def click_order_continue(d) -> bool:
     return False
 
 def send_auth_request(d, name: str, phone11: str):
-    """
-    인증발송(A)
-    return: (ok: bool, reason: str)
-    """
     if not ensure_on_mobile_order_home(d):
         return (False, "NOT_READY")
 
@@ -508,25 +550,14 @@ def send_auth_request(d, name: str, phone11: str):
     return (True, "OK")
 
 def try_start_sign_flow(d) -> bool:
-    """
-    ✅ 전자서명 단계(절대 실수 금지)
-    - 주문현황 진입
-    - 필터를 인증완료로 강제
-    - 새로고침 1회
-    - 리스트의 인증완료 버튼을 위에서부터 하나씩 눌러 상세 진입
-      -> 상세에서 (저장된 name + phone) 완전일치 되는 경우에만 '주문 이어서 하기'
-      -> 매칭 안되면 즉시 back 후 다음 인증완료로
-    """
     if not goto_order_status(d):
         return False
 
-    # 필터/새로고침을 먼저 확실히
     if not ensure_filter_auth_done(d):
         return False
 
     click_refresh_on_order_status(d)
 
-    # 처리할 후보가 없으면 인증완료 클릭 자체를 안 함(안전)
     with jobs_lock:
         candidates = [(p, j) for (p, j) in auth_sent_jobs.items() if p not in sign_started]
     if not candidates:
@@ -536,17 +567,14 @@ def try_start_sign_flow(d) -> bool:
     if not buttons:
         return False
 
-    # 인증완료 항목을 최대 5개까지 시도
     for btn in buttons[:5]:
         try:
-            # 상세로 진입
             b = btn.info.get("bounds", {})
             cx = (int(b.get("left", 0)) + int(b.get("right", 0))) // 2
             cy = (int(b.get("top", 0)) + int(b.get("bottom", 0))) // 2
             d.click(cx, cy)
             time.sleep(0.9)
 
-            # 상세 화면에서 우리 건 매칭
             matched_phone = ""
             matched_job = None
 
@@ -557,11 +585,9 @@ def try_start_sign_flow(d) -> bool:
                     break
 
             if not matched_phone:
-                # 우리 건 아니면 즉시 뒤로가기 (절대 주문 이어서 하기 금지)
                 back_to_order_list(d)
                 continue
 
-            # 매칭된 경우에만 진행
             ok = click_order_continue(d)
             if not ok:
                 if STOP_ON_ERROR:
@@ -575,7 +601,6 @@ def try_start_sign_flow(d) -> bool:
             return True
 
         except Exception:
-            # 어떤 예외든 무조건 뒤로가서 원위치
             back_to_order_list(d)
             continue
 
@@ -605,19 +630,16 @@ def emulator_main_loop():
             now = time.time()
             auth_pending = not auth_q.empty()
 
-            # Idle 상태에서만 1분마다: 주문현황 → 인증완료 필터 → 새로고침
             if (not auth_pending) and (now - last_refresh >= ORDER_REFRESH_INTERVAL_SEC):
                 if goto_order_status(d):
                     ensure_filter_auth_done(d)
                     click_refresh_on_order_status(d)
                 last_refresh = now
 
-            # 전자서명 스캔(주기)
             if now - last_sign_scan >= SIGN_SCAN_INTERVAL_SEC:
                 last_sign_scan = now
                 try_start_sign_flow(d)
 
-            # 인증발송 처리
             try:
                 job = auth_q.get_nowait()
             except queue.Empty:
@@ -636,7 +658,6 @@ def emulator_main_loop():
                             auth_sent_jobs[phone11] = job
                         print(f"✅ 인증발송 성공: {name} / {phone11}")
 
-                        # 인증발송 직후 1회: 주문현황으로 가서 인증완료 필터 + 새로고침
                         if goto_order_status(d):
                             ensure_filter_auth_done(d)
                             click_refresh_on_order_status(d)
