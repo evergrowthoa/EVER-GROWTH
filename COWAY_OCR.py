@@ -303,12 +303,20 @@ def goto_order_status(d) -> bool:
 
 def click_refresh_on_order_status(d) -> bool:
     """
-    ✅ 주문현황 우측 새로고침(원형 화살표) 클릭
-    텍스트가 없을 수 있으니:
-    1) content-desc 후보
-    2) 우측 상단 영역의 클릭 가능한 아이콘 탐색
-    3) 최후: 리스트 상단에서 살짝 당겨 새로고침(swipe)
+    ✅ 주문현황 우측 원형 새로고침 아이콘 클릭 (텍스트/desc 없는 케이스 대응)
+
+    전략:
+    1) desc로 먼저 시도
+    2) '검색창 오른쪽 영역'에 있는 작은 clickable(정사각형에 가까운) 버튼을 bounds로 골라 클릭
+    3) 그래도 못 찾으면 목표 좌표(우측 상단 검색영역 근처)를 직접 클릭(상대좌표)
     """
+    # 주문현황 화면이 아니면 아무것도 하지 않음
+    try:
+        if not d(text="주문현황").exists:
+            return False
+    except Exception:
+        return False
+
     # 1) description 후보
     for desc in ["새로고침", "refresh", "Refresh", "갱신"]:
         try:
@@ -319,26 +327,66 @@ def click_refresh_on_order_status(d) -> bool:
         except Exception:
             pass
 
-    # 2) 우측 상단 영역 클릭 가능한 아이콘 탐색
+    # 2) bounds 기반: 검색창 오른쪽(우측 상단)에 있는 작은 버튼 찾기
     try:
         w, h = d.window_size()
+
+        # 새로고침 아이콘이 위치한 대략적인 목표점(상대좌표)
+        # (너가 찍은 화면 기준: 검색 입력창 오른쪽, 상단 헤더 영역)
+        tx = int(w * 0.94)
+        ty = int(h * 0.245)
+
         cand = d(clickable=True).all()
         best = None
+        best_score = 10**18
+
         for o in cand:
             try:
                 info = o.info
                 b = info.get("bounds", {})
-                left = b.get("left", 0)
-                top = b.get("top", 0)
-                right = b.get("right", 0)
-                bottom = b.get("bottom", 0)
+                left = int(b.get("left", 0))
+                top = int(b.get("top", 0))
+                right = int(b.get("right", 0))
+                bottom = int(b.get("bottom", 0))
 
-                # 우측(> 85%) + 상단(대략 12%~35%) 영역
-                if right >= int(w * 0.85) and top >= int(h * 0.12) and top <= int(h * 0.35):
-                    # 너무 큰 버튼(예: 전체영역) 제외
-                    if (right - left) <= int(w * 0.35) and (bottom - top) <= int(h * 0.25):
-                        best = o
-                        break
+                bw = right - left
+                bh = bottom - top
+                if bw <= 0 or bh <= 0:
+                    continue
+
+                cx = (left + right) // 2
+                cy = (top + bottom) // 2
+                area = bw * bh
+
+                # ✅ "검색창 오른쪽" 후보 영역으로 강하게 제한
+                #   - 매우 우측
+                #   - 상단(검색창/필터가 있는 줄) 근처
+                if cx < int(w * 0.86):
+                    continue
+                if cy < int(h * 0.16) or cy > int(h * 0.33):
+                    continue
+
+                # ✅ 너무 큰 영역(전체 row/큰 버튼) 제외
+                if bw > int(w * 0.22) or bh > int(h * 0.18):
+                    continue
+
+                # ✅ 너무 작은 점(아이콘 아닌 잡다한 클릭영역) 제외
+                if bw < 24 or bh < 24:
+                    continue
+
+                # ✅ 정사각형에 가까운 버튼을 선호(원형 새로고침 버튼이 보통 이 형태)
+                ratio = bw / float(bh)
+                squareness = abs(ratio - 1.0)
+
+                # 목표점과의 거리
+                dist = (cx - tx) * (cx - tx) + (cy - ty) * (cy - ty)
+
+                # 점수: 거리 + (정사각형일수록 가산 적음) + (면적이 너무 크면 불리)
+                score = dist + int(squareness * 200000) + int(area * 0.5)
+
+                if score < best_score:
+                    best_score = score
+                    best = o
             except Exception:
                 continue
 
@@ -346,10 +394,14 @@ def click_refresh_on_order_status(d) -> bool:
             best.click()
             time.sleep(0.6)
             return True
-    except Exception:
-        pass
 
-    # 3) pull-to-refresh(최후)
+        # 3) 후보를 못 찾으면 목표 좌표를 직접 클릭(상대좌표)
+        d.click(tx, ty)
+        time.sleep(0.6)
+        return True
+
+    except Exception:
+        return False
     try:
         w, h = d.window_size()
         d.swipe(int(w * 0.5), int(h * 0.18), int(w * 0.5), int(h * 0.55), 0.15)
