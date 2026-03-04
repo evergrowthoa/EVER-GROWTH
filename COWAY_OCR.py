@@ -267,41 +267,55 @@ def open_digital_sales_app(d) -> bool:
 def ensure_on_mobile_order_home(d) -> bool:
     """
     ✅ 어떤 화면이든 '모바일 주문(일반 주문하기)' 화면까지 복구
-    - 주문현황(리스트)에서 인증발송이 들어와도 동작해야 하므로
-    주문현황이면 '닫기(X)' 또는 '뒤로가기'로 빠져나온 뒤 모바일주문 탭으로 복귀한다.
+    - 주문현황에서 X 누르면 확인 팝업이 뜨므로:
+    X 클릭 → 팝업 '확인' 클릭 → 모바일 주문 홈으로 복귀
     """
-    for _ in range(6):
-        # 이미 목표 화면이면 끝
+    for _ in range(10):
+        # 목표 화면이면 종료
         if d(text="일반 주문하기").exists:
             return True
 
-        # 1) 주문현황이면: 우측 상단 X(닫기) 좌표 클릭 + back 보조
+        # ✅ 주문현황(리스트) 화면 처리: X → (팝업) 확인
         if d(text="주문현황").exists:
             try:
                 w, h = d.window_size()
-                # 우측 상단 X 근처(상대좌표)
-                d.click(int(w * 0.965), int(h * 0.075))
-                time.sleep(0.6)
+                d.click(int(w * 0.965), int(h * 0.075))  # 우측 상단 X 근처
+                time.sleep(0.4)
             except Exception:
                 pass
 
-            if d(text="주문현황").exists:
-                try:
-                    d.press("back")
-                    time.sleep(0.6)
-                except Exception:
-                    pass
+            # 팝업: "모바일 주문을 종료하시겠습니까?" / 버튼 "취소", "확인"
+            # 텍스트가 약간 달라도 '확인' 버튼만 있으면 눌러서 진행
+            for _ in range(10):
+                if d(text="확인").exists:
+                    try:
+                        d(text="확인").click()
+                        time.sleep(0.8)
+                        break
+                    except Exception:
+                        pass
+                # 팝업이 아직 안 떴을 수 있으니 잠깐 대기
+                time.sleep(0.2)
 
             continue
 
-        # 2) 앱 내부면 모바일 주문 탭을 눌러보기
+        # (혹시) 종료 팝업만 떠 있는 경우에도 처리
+        if d(text="확인").exists and d(text="취소").exists:
+            try:
+                d(text="확인").click()
+                time.sleep(0.8)
+            except Exception:
+                pass
+            continue
+
+        # 앱 내부면 하단 탭 '모바일 주문'으로 복귀 시도
         if d(text="모바일 주문").exists:
             click_first_clickable_text(d, "모바일 주문")
             time.sleep(1.0)
             if d(text="일반 주문하기").exists:
                 return True
 
-        # 3) 앱이 꺼졌거나 런처면 앱을 켠다
+        # 앱이 꺼졌거나 런처면 앱 실행
         opened = open_digital_sales_app(d)
         if opened:
             if d(text="모바일 주문").exists:
