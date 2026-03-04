@@ -32,8 +32,8 @@ DIGITAL_SALES_PACKAGE = ""   # 패키지명 알면 넣으면 더 안정적(모�
 # ===========================
 # 주기/안전 옵션
 # ===========================
-SIGN_SCAN_INTERVAL_SEC = 20      # 인증완료 스캔 주기
-ORDER_REFRESH_INTERVAL_SEC = 60  # ✅ Idle일 때 주문현황 새로고침 주기(1분)
+SIGN_SCAN_INTERVAL_SEC = 20
+ORDER_REFRESH_INTERVAL_SEC = 60
 STOP_ON_ERROR = True
 AUTH_RETRY_MAX = 5
 
@@ -215,26 +215,42 @@ def connect_emulator():
     d.implicitly_wait(5.0)
     return d
 
-def click_first_clickable_text(d, txt: str) -> bool:
+def click_text_center(d, txt: str, y_min_ratio: float = 0.0, y_max_ratio: float = 1.0) -> bool:
+    """
+    텍스트를 '클릭 가능한지'에 의존하지 않고,
+    해당 텍스트 요소의 bounds 중앙 좌표를 클릭한다.
+    """
     try:
+        w, h = d.window_size()
         objs = d(text=txt).all()
         for o in objs:
             try:
                 info = o.info
-                if info.get("clickable", False):
-                    o.click()
-                    return True
+                b = info.get("bounds", {})
+                left = int(b.get("left", 0))
+                top = int(b.get("top", 0))
+                right = int(b.get("right", 0))
+                bottom = int(b.get("bottom", 0))
+                cx = (left + right) // 2
+                cy = (top + bottom) // 2
+
+                if cy < int(h * y_min_ratio) or cy > int(h * y_max_ratio):
+                    continue
+
+                d.click(cx, cy)
+                return True
             except Exception:
                 continue
     except Exception:
         pass
 
-    if d(text=txt).exists:
-        try:
+    # 마지막 fallback
+    try:
+        if d(text=txt).exists:
             d(text=txt).click()
             return True
-        except Exception:
-            return False
+    except Exception:
+        return False
 
     return False
 
@@ -258,71 +274,56 @@ def open_digital_sales_app(d) -> bool:
         pass
 
     if d(text=DIGITAL_SALES_APP_NAME).exists:
-        ok = click_first_clickable_text(d, DIGITAL_SALES_APP_NAME)
+        click_text_center(d, DIGITAL_SALES_APP_NAME)
         time.sleep(2.0)
-        return ok
+        return True
 
     return False
 
 def ensure_on_mobile_order_home(d) -> bool:
     """
-    ✅ 어떤 화면이든 '모바일 주문(일반 주문하기)' 화면까지 복구
-    - 주문현황에서 X 누르면 확인 팝업이 뜨므로:
-    X 클릭 → 팝업 '확인' 클릭 → 모바일 주문 홈으로 복귀
+    주문현황에 있어도 인증발송이 가능하도록:
+    주문현황 X 클릭 → 종료 팝업 '확인' 클릭 → 모바일 주문 홈
     """
     for _ in range(10):
-        # 목표 화면이면 종료
         if d(text="일반 주문하기").exists:
             return True
 
-        # ✅ 주문현황(리스트) 화면 처리: X → (팝업) 확인
         if d(text="주문현황").exists:
             try:
                 w, h = d.window_size()
-                d.click(int(w * 0.965), int(h * 0.075))  # 우측 상단 X 근처
-                time.sleep(0.4)
+                d.click(int(w * 0.965), int(h * 0.075))  # 우측 상단 X
+                time.sleep(0.3)
             except Exception:
                 pass
 
-            # 팝업: "모바일 주문을 종료하시겠습니까?" / 버튼 "취소", "확인"
-            # 텍스트가 약간 달라도 '확인' 버튼만 있으면 눌러서 진행
+            # 종료 팝업이면 확인
             for _ in range(10):
-                if d(text="확인").exists:
-                    try:
-                        d(text="확인").click()
-                        time.sleep(0.8)
-                        break
-                    except Exception:
-                        pass
-                # 팝업이 아직 안 떴을 수 있으니 잠깐 대기
+                if d(text="확인").exists and d(text="취소").exists:
+                    click_text_center(d, "확인", 0.45, 0.95)
+                    time.sleep(0.8)
+                    break
                 time.sleep(0.2)
 
             continue
 
-        # (혹시) 종료 팝업만 떠 있는 경우에도 처리
         if d(text="확인").exists and d(text="취소").exists:
-            try:
-                d(text="확인").click()
-                time.sleep(0.8)
-            except Exception:
-                pass
+            click_text_center(d, "확인", 0.45, 0.95)
+            time.sleep(0.8)
             continue
 
-        # 앱 내부면 하단 탭 '모바일 주문'으로 복귀 시도
         if d(text="모바일 주문").exists:
-            click_first_clickable_text(d, "모바일 주문")
+            click_text_center(d, "모바일 주문", 0.70, 0.98)  # 하단 탭 영역
             time.sleep(1.0)
             if d(text="일반 주문하기").exists:
                 return True
 
-        # 앱이 꺼졌거나 런처면 앱 실행
         opened = open_digital_sales_app(d)
-        if opened:
-            if d(text="모바일 주문").exists:
-                click_first_clickable_text(d, "모바일 주문")
-                time.sleep(1.0)
-                if d(text="일반 주문하기").exists:
-                    return True
+        if opened and d(text="모바일 주문").exists:
+            click_text_center(d, "모바일 주문", 0.70, 0.98)
+            time.sleep(1.0)
+            if d(text="일반 주문하기").exists:
+                return True
 
         time.sleep(0.4)
 
@@ -332,161 +333,122 @@ def ensure_on_order_status_screen(d):
     return d(text="주문현황").exists
 
 def goto_order_status(d) -> bool:
-    """
-    ✅ 어떤 화면이든 '주문현황'까지 복구해서 진입
-    순서:
-    1) 주문현황이면 OK
-    2) 모바일주문 홈(일반 주문하기 보이는 화면)으로 복구
-    3) 모바일주문 홈에서 '일반주문' 클릭 → 주문현황
-    """
-    try:
-        if d(text="주문현황").exists:
-            return True
-    except Exception:
-        pass
-
-    # 1) 모바일주문 홈으로 복구 (앱 메인/런처에서도 복구되도록)
+    if ensure_on_order_status_screen(d):
+        return True
     if not ensure_on_mobile_order_home(d):
         return False
-
-    # 2) 모바일주문 홈에서 일반주문 클릭 → 주문현황
-    try:
-        if d(text="일반주문").exists:
-            click_first_clickable_text(d, "일반주문")
-            time.sleep(1.0)
-            return d(text="주문현황").exists
-    except Exception:
-        return False
-
+    if d(text="일반주문").exists:
+        click_text_center(d, "일반주문", 0.35, 0.70)
+        time.sleep(1.0)
+        return ensure_on_order_status_screen(d)
     return False
 
 def click_refresh_on_order_status(d) -> bool:
     """
-    ✅ 주문현황 우측 원형 새로고침 아이콘 클릭
-    - 이 버튼은 text/desc가 없는 경우가 많아서 '좌표'로 누르는게 제일 확실함.
-    - 화면 크기가 바뀌어도 동작하도록 상대좌표로 3번 시도.
+    우측 원형 새로고침 버튼은 텍스트가 없으니 좌표로 누른다(상대좌표).
     """
     try:
         if not d(text="주문현황").exists:
             return False
-    except Exception:
-        return False
-
-    try:
         w, h = d.window_size()
-
-        # 너가 표시한 원형 버튼 위치(검색창 오른쪽)를 상대좌표로 여러 번 시도
-        # 화면/기기마다 살짝 달라서 y를 3개로 잡음
-        candidates = [
-            (int(w * 0.955), int(h * 0.265)),
-            (int(w * 0.955), int(h * 0.285)),
-            (int(w * 0.955), int(h * 0.305)),
-        ]
-
-        for x, y in candidates:
-            d.click(x, y)
-            time.sleep(0.6)
+        # 버튼 위치가 기기마다 조금 달라서 y를 3개로 시도
+        for ry in (0.265, 0.285, 0.305):
+            d.click(int(w * 0.955), int(h * ry))
+            time.sleep(0.5)
             return True
-
     except Exception:
         return False
-
     return False
 
 def ensure_filter_auth_done(d) -> bool:
     """
-    ✅ 어떤 필터(인증입력/서명입력/주문확정 등)든 무조건 '인증완료'로 맞춘다.
-    - 진행상태 버튼이 보이면 그걸 우선 클릭
-    - 안 보이면 상단 필터칩 영역(좌측)을 좌표 클릭해서 필터 패널을 연다
-    - 열린 패널에서 '인증완료'를 클릭
-    """
-    try:
-        if not d(text="주문현황").exists:
-            return False
-    except Exception:
-        return False
-
-    # 1) '진행상태' 버튼이 있으면 가장 확실
-    if d(text="진행상태").exists:
-        click_first_clickable_text(d, "진행상태")
-        time.sleep(0.6)
-        if d(text="인증완료").exists:
-            click_first_clickable_text(d, "인증완료")
-            time.sleep(0.8)
-            return True
-        return False
-
-    # 2) 진행상태 텍스트가 안 보이는 경우: 필터칩(좌측 상단)을 좌표로 눌러 패널을 연다
-    try:
-        w, h = d.window_size()
-
-        # 필터칩 위치(너 캡처 기준: "판매인 12" 아래, 좌측에 동그란 칩)
-        # 대략 좌측 20% / 상단 30~35% 근처
-        d.click(int(w * 0.18), int(h * 0.335))
-        time.sleep(0.6)
-
-        if d(text="인증완료").exists:
-            click_first_clickable_text(d, "인증완료")
-            time.sleep(0.8)
-            return True
-
-        return False
-    except Exception:
-        return False
-
-def click_auth_done_item_in_list(d) -> bool:
-    """
-    ✅ 인증완료 리스트 항목(핑크)을 눌러 상세로 진입
-    필터 칩과 겹치므로, '리스트 영역'에 있는 인증완료 버튼만 클릭한다.
+    ✅ 진행상태 필터 패널에서 '인증완료'를 반드시 선택.
+    (텍스트 클릭이 아니라 bounds 중앙 클릭으로 처리)
     """
     if not ensure_on_order_status_screen(d):
         return False
 
-    try:
-        w, h = d.window_size()
-        objs = d(text="인증완료").all()
-        buttons = []
-        for o in objs:
-            try:
-                info = o.info
-                b = info.get("bounds", {})
-                top = b.get("top", 0)
-                # 리스트 영역(대략 35% 이후)만 대상으로
-                if top >= int(h * 0.35):
-                    buttons.append((top, o))
-            except Exception:
-                continue
-
-        buttons.sort(key=lambda x: x[0])
-        if not buttons:
+    # 1) 진행상태 버튼 열기
+    if d(text="진행상태").exists:
+        click_text_center(d, "진행상태", 0.20, 0.45)
+        time.sleep(0.7)
+    else:
+        # 진행상태 글자가 안 보이는 경우라도, 좌측 상단 칩 위치를 눌러 패널 열기
+        try:
+            w, h = d.window_size()
+            d.click(int(w * 0.18), int(h * 0.335))
+            time.sleep(0.7)
+        except Exception:
             return False
 
-        buttons[0][1].click()
-        time.sleep(0.8)
-        return True
-    except Exception:
+    # 2) 하단 패널에서 인증완료 클릭 (패널은 화면 하단에 뜸)
+    if not d(text="인증완료").exists:
         return False
 
-def match_detail_by_name_phone(d, name: str, phone11: str) -> bool:
+    click_text_center(d, "인증완료", 0.55, 0.98)
+    time.sleep(0.8)
+
+    # 3) 패널이 남아있으면 한번 back으로 닫기
+    if d(text="전체보기").exists or d(text="인증입력").exists:
+        try:
+            d.press("back")
+            time.sleep(0.5)
+        except Exception:
+            pass
+
+    return True
+
+def click_auth_done_buttons_in_list(d):
+    """
+    인증완료 버튼들(리스트 영역)에 대한 객체들을 위에서부터 반환
+    """
+    objs = []
+    try:
+        w, h = d.window_size()
+        for o in d(text="인증완료").all():
+            try:
+                b = o.info.get("bounds", {})
+                top = int(b.get("top", 0))
+                # 리스트 영역만(상단 필터/검색 영역 제외)
+                if top >= int(h * 0.40):
+                    objs.append((top, o))
+            except Exception:
+                continue
+        objs.sort(key=lambda x: x[0])
+    except Exception:
+        pass
+    return [o for _, o in objs]
+
+def match_detail_by_name_phone_strict(d, name: str, phone11: str) -> bool:
+    """
+    ✅ 절대 실수 방지:
+    - name이 비어있거나 2글자 미만이면 무조건 False
+    - phone이 010-xxxx-xxxx 형태로 매칭될 때만 True
+    """
+    if not name or len(name.strip()) < 2:
+        return False
     phone_disp = phone11_to_display(phone11)
     if not phone_disp:
         return False
     return d(text=name).exists and d(text=phone_disp).exists
 
+def back_to_order_list(d) -> bool:
+    for _ in range(4):
+        if d(text="주문현황").exists:
+            return True
+        try:
+            d.press("back")
+        except Exception:
+            pass
+        time.sleep(0.5)
+    return d(text="주문현황").exists
+
 def click_order_continue(d) -> bool:
     if d(text="주문 이어서 하기").exists:
-        click_first_clickable_text(d, "주문 이어서 하기")
+        click_text_center(d, "주문 이어서 하기", 0.35, 0.90)
         time.sleep(0.8)
         return True
     return False
-
-def back_to_order_list(d) -> bool:
-    for _ in range(4):
-        if ensure_on_order_status_screen(d):
-            return True
-        d.press("back")
-        time.sleep(0.5)
-    return ensure_on_order_status_screen(d)
 
 def send_auth_request(d, name: str, phone11: str):
     """
@@ -496,14 +458,14 @@ def send_auth_request(d, name: str, phone11: str):
     if not ensure_on_mobile_order_home(d):
         return (False, "NOT_READY")
 
-    click_first_clickable_text(d, "일반 주문하기")
+    click_text_center(d, "일반 주문하기", 0.20, 0.55)
     time.sleep(0.8)
 
     if not d(text="주문접수").exists and not d(text="본인인증 요청").exists:
         return (False, "NOT_ORDER_FORM")
 
     if d(text="개인").exists:
-        click_first_clickable_text(d, "개인")
+        click_text_center(d, "개인", 0.15, 0.45)
         time.sleep(0.2)
 
     edits = d(className="android.widget.EditText")
@@ -519,7 +481,6 @@ def send_auth_request(d, name: str, phone11: str):
     edits[1].set_text(phone11)
 
     btn = d(text="본인인증 요청")
-
     clicked_auth = False
     for _ in range(20):
         if btn.exists and btn.info.get("enabled", False):
@@ -537,12 +498,10 @@ def send_auth_request(d, name: str, phone11: str):
     if not clicked_auth:
         return (False, "NO_AUTH_BTN")
 
-    send_clicked = False
     for _ in range(40):
         if d(text="발송").exists:
-            click_first_clickable_text(d, "발송")
+            click_text_center(d, "발송", 0.45, 0.95)
             time.sleep(0.6)
-            send_clicked = True
             break
         time.sleep(0.2)
 
@@ -550,49 +509,77 @@ def send_auth_request(d, name: str, phone11: str):
 
 def try_start_sign_flow(d) -> bool:
     """
-    전자서명(B) 시작점:
+    ✅ 전자서명 단계(절대 실수 금지)
     - 주문현황 진입
-    - 필터를 인증완료로 맞춤
-    - 리스트에서 인증완료 항목 하나 진입
-    - 상세에서 이름+전화번호 일치할 때만 '주문 이어서 하기'
+    - 필터를 인증완료로 강제
+    - 새로고침 1회
+    - 리스트의 인증완료 버튼을 위에서부터 하나씩 눌러 상세 진입
+      -> 상세에서 (저장된 name + phone) 완전일치 되는 경우에만 '주문 이어서 하기'
+      -> 매칭 안되면 즉시 back 후 다음 인증완료로
     """
     if not goto_order_status(d):
         return False
 
+    # 필터/새로고침을 먼저 확실히
     if not ensure_filter_auth_done(d):
-        # 필터를 못 맞추면 진행 금지
         return False
 
-    if not click_auth_done_item_in_list(d):
-        return False
+    click_refresh_on_order_status(d)
 
-    matched_phone = ""
-    matched_job = None
-
+    # 처리할 후보가 없으면 인증완료 클릭 자체를 안 함(안전)
     with jobs_lock:
         candidates = [(p, j) for (p, j) in auth_sent_jobs.items() if p not in sign_started]
-
-    for phone11, job in candidates:
-        if match_detail_by_name_phone(d, job.get("name", ""), phone11):
-            matched_phone = phone11
-            matched_job = job
-            break
-
-    if not matched_phone:
-        back_to_order_list(d)
+    if not candidates:
         return False
 
-    ok = click_order_continue(d)
-    if not ok:
-        if STOP_ON_ERROR:
-            set_stop("인증완료 상세에서 '주문 이어서 하기' 버튼을 못 찾음")
+    buttons = click_auth_done_buttons_in_list(d)
+    if not buttons:
         return False
 
-    with jobs_lock:
-        sign_started.add(matched_phone)
+    # 인증완료 항목을 최대 5개까지 시도
+    for btn in buttons[:5]:
+        try:
+            # 상세로 진입
+            b = btn.info.get("bounds", {})
+            cx = (int(b.get("left", 0)) + int(b.get("right", 0))) // 2
+            cy = (int(b.get("top", 0)) + int(b.get("bottom", 0))) // 2
+            d.click(cx, cy)
+            time.sleep(0.9)
 
-    notify(f"전자서명 단계 진입: {matched_job.get('name','')} / {matched_phone}")
-    return True
+            # 상세 화면에서 우리 건 매칭
+            matched_phone = ""
+            matched_job = None
+
+            for phone11, job in candidates:
+                if match_detail_by_name_phone_strict(d, job.get("name", ""), phone11):
+                    matched_phone = phone11
+                    matched_job = job
+                    break
+
+            if not matched_phone:
+                # 우리 건 아니면 즉시 뒤로가기 (절대 주문 이어서 하기 금지)
+                back_to_order_list(d)
+                continue
+
+            # 매칭된 경우에만 진행
+            ok = click_order_continue(d)
+            if not ok:
+                if STOP_ON_ERROR:
+                    set_stop("매칭 성공했는데 '주문 이어서 하기' 버튼을 못 찾음")
+                return False
+
+            with jobs_lock:
+                sign_started.add(matched_phone)
+
+            notify(f"전자서명 진입(매칭 OK): {matched_job.get('name','')} / {matched_phone}")
+            return True
+
+        except Exception:
+            # 어떤 예외든 무조건 뒤로가서 원위치
+            back_to_order_list(d)
+            continue
+
+    return False
 
 # ===========================
 # 에뮬레이터 단일 워커 (겹침 방지)
@@ -615,24 +602,22 @@ def emulator_main_loop():
                 time.sleep(1.0)
                 continue
 
-            # ✅ Idle 판정: 인증발송 큐가 비어있고, 지금 루프에서 인증발송/전자서명 작업을 수행하지 않을 때만 새로고침
+            now = time.time()
             auth_pending = not auth_q.empty()
 
-            now = time.time()
-
-            # 0) Idle 상태에서 1분마다 주문현황 새로고침 (작업 중이면 절대 안 함)
+            # Idle 상태에서만 1분마다: 주문현황 → 인증완료 필터 → 새로고침
             if (not auth_pending) and (now - last_refresh >= ORDER_REFRESH_INTERVAL_SEC):
                 if goto_order_status(d):
-                    if ensure_filter_auth_done(d):
-                        click_refresh_on_order_status(d)
+                    ensure_filter_auth_done(d)
+                    click_refresh_on_order_status(d)
                 last_refresh = now
 
-            # 1) 전자서명(B) 스캔 (20초 주기)
+            # 전자서명 스캔(주기)
             if now - last_sign_scan >= SIGN_SCAN_INTERVAL_SEC:
                 last_sign_scan = now
                 try_start_sign_flow(d)
 
-            # 2) 인증발송(A) 처리
+            # 인증발송 처리
             try:
                 job = auth_q.get_nowait()
             except queue.Empty:
@@ -651,19 +636,16 @@ def emulator_main_loop():
                             auth_sent_jobs[phone11] = job
                         print(f"✅ 인증발송 성공: {name} / {phone11}")
 
-    # ✅ 인증발송 직후: 주문현황으로 가서 인증완료 필터 고정 + 새로고침 1회
-    # (작업 중 새로고침 금지 규칙을 깨지 않게, "인증발송이 끝난 직후"에만 실행)
-                        try:
-                            if goto_order_status(d):
-                                ensure_filter_auth_done(d)
-                                click_refresh_on_order_status(d)
-                        except Exception:
-                            pass
+                        # 인증발송 직후 1회: 주문현황으로 가서 인증완료 필터 + 새로고침
+                        if goto_order_status(d):
+                            ensure_filter_auth_done(d)
+                            click_refresh_on_order_status(d)
+
                     else:
                         if reason == "NOT_READY" and retry < AUTH_RETRY_MAX:
                             retry += 1
                             job["_retry"] = retry
-                            print(f"⚠️ 인증발송 재시도 예정 ({retry}/{AUTH_RETRY_MAX}) : {name} / {phone11}")
+                            print(f"⚠️ 인증발송 재시도 ({retry}/{AUTH_RETRY_MAX}) : {name} / {phone11}")
                             auth_q.put(job)
                         else:
                             if STOP_ON_ERROR:
@@ -745,7 +727,7 @@ while True:
         zipcode = data.get("zipcode", "")
 
         if not phone11:
-            print("❌ 전화번호(라벨 기반) 추출 실패 → 오인 방지로 건너뜀")
+            print("❌ 전화번호 추출 실패 → 건너뜀")
             debug_modal_inputs(modal)
             time.sleep(0.8)
             continue
