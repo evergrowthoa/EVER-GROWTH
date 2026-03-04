@@ -265,16 +265,43 @@ def open_digital_sales_app(d) -> bool:
     return False
 
 def ensure_on_mobile_order_home(d) -> bool:
-    for _ in range(3):
+    """
+    ✅ 어떤 화면이든 '모바일 주문(일반 주문하기)' 화면까지 복구
+    - 주문현황(리스트)에서 인증발송이 들어와도 동작해야 하므로
+    주문현황이면 '닫기(X)' 또는 '뒤로가기'로 빠져나온 뒤 모바일주문 탭으로 복귀한다.
+    """
+    for _ in range(6):
+        # 이미 목표 화면이면 끝
         if d(text="일반 주문하기").exists:
             return True
 
+        # 1) 주문현황이면: 우측 상단 X(닫기) 좌표 클릭 + back 보조
+        if d(text="주문현황").exists:
+            try:
+                w, h = d.window_size()
+                # 우측 상단 X 근처(상대좌표)
+                d.click(int(w * 0.965), int(h * 0.075))
+                time.sleep(0.6)
+            except Exception:
+                pass
+
+            if d(text="주문현황").exists:
+                try:
+                    d.press("back")
+                    time.sleep(0.6)
+                except Exception:
+                    pass
+
+            continue
+
+        # 2) 앱 내부면 모바일 주문 탭을 눌러보기
         if d(text="모바일 주문").exists:
             click_first_clickable_text(d, "모바일 주문")
             time.sleep(1.0)
             if d(text="일반 주문하기").exists:
                 return True
 
+        # 3) 앱이 꺼졌거나 런처면 앱을 켠다
         opened = open_digital_sales_app(d)
         if opened:
             if d(text="모바일 주문").exists:
@@ -283,7 +310,7 @@ def ensure_on_mobile_order_home(d) -> bool:
                 if d(text="일반 주문하기").exists:
                     return True
 
-        time.sleep(0.5)
+        time.sleep(0.4)
 
     return d(text="일반 주문하기").exists
 
@@ -354,81 +381,42 @@ def click_refresh_on_order_status(d) -> bool:
 
 def ensure_filter_auth_done(d) -> bool:
     """
-    ✅ 진행상태 필터를 무조건 '인증완료'로 맞춘다.
-    - 현재 칩이 '인증입력/서명입력/주문확정/인증완료' 등 무엇이든 상관없이
-      그 칩(진행상태 필터 버튼)을 눌러 메뉴를 열고 '인증완료'를 선택한다.
+    ✅ 어떤 필터(인증입력/서명입력/주문확정 등)든 무조건 '인증완료'로 맞춘다.
+    - 진행상태 버튼이 보이면 그걸 우선 클릭
+    - 안 보이면 상단 필터칩 영역(좌측)을 좌표 클릭해서 필터 패널을 연다
+    - 열린 패널에서 '인증완료'를 클릭
     """
-
     try:
         if not d(text="주문현황").exists:
             return False
     except Exception:
         return False
 
-    try:
-        w, h = d.window_size()
-
-        # 1) 상단 영역(필터칩이 있는 영역)에서 '현재 상태 칩'을 찾는다.
-        #    (진행상태/인증입력/인증완료/서명입력/주문확정/주문삭제 중 하나가 상단에 있음)
-        chip_texts = ["진행상태", "인증입력", "인증완료", "서명입력", "주문확정", "주문삭제"]
-        chip = None
-
-        for t in chip_texts:
-            try:
-                objs = d(text=t).all()
-            except Exception:
-                objs = []
-
-            for o in objs:
-                try:
-                    info = o.info
-                    b = info.get("bounds", {})
-                    top = int(b.get("top", 999999))
-                    left = int(b.get("left", 0))
-
-                    # 필터칩은 '상단 중간' 영역에 있음 (대략 18%~40%)
-                    if top >= int(h * 0.18) and top <= int(h * 0.40) and left <= int(w * 0.60):
-                        chip = o
-                        break
-                except Exception:
-                    continue
-
-            if chip is not None:
-                break
-
-        if chip is None:
-            return False
-
-        # 2) 칩을 눌러서 메뉴를 연다
-        chip.click()
+    # 1) '진행상태' 버튼이 있으면 가장 확실
+    if d(text="진행상태").exists:
+        click_first_clickable_text(d, "진행상태")
         time.sleep(0.6)
-
-        # 3) 메뉴에서 '인증완료' 선택
         if d(text="인증완료").exists:
             click_first_clickable_text(d, "인증완료")
             time.sleep(0.8)
+            return True
+        return False
 
-        # 4) 상단에 '인증완료' 칩이 보이면 성공(상단 영역만 확인)
-        objs2 = []
-        try:
-            objs2 = d(text="인증완료").all()
-        except Exception:
-            objs2 = []
+    # 2) 진행상태 텍스트가 안 보이는 경우: 필터칩(좌측 상단)을 좌표로 눌러 패널을 연다
+    try:
+        w, h = d.window_size()
 
-        for o in objs2:
-            try:
-                info = o.info
-                b = info.get("bounds", {})
-                top = int(b.get("top", 999999))
-                left = int(b.get("left", 0))
-                if top >= int(h * 0.18) and top <= int(h * 0.40) and left <= int(w * 0.60):
-                    return True
-            except Exception:
-                continue
+        # 필터칩 위치(너 캡처 기준: "판매인 12" 아래, 좌측에 동그란 칩)
+        # 대략 좌측 20% / 상단 30~35% 근처
+        d.click(int(w * 0.18), int(h * 0.335))
+        time.sleep(0.6)
 
-        # 그래도 확인이 애매하면 '인증완료'가 메뉴에서 눌렸다고 가정하고 True
-        return True
+        if d(text="인증완료").exists:
+            click_first_clickable_text(d, "인증완료")
+            time.sleep(0.8)
+            return True
 
+        return False
     except Exception:
         return False
 
@@ -648,6 +636,15 @@ def emulator_main_loop():
                         with jobs_lock:
                             auth_sent_jobs[phone11] = job
                         print(f"✅ 인증발송 성공: {name} / {phone11}")
+
+    # ✅ 인증발송 직후: 주문현황으로 가서 인증완료 필터 고정 + 새로고침 1회
+    # (작업 중 새로고침 금지 규칙을 깨지 않게, "인증발송이 끝난 직후"에만 실행)
+                        try:
+                            if goto_order_status(d):
+                                ensure_filter_auth_done(d)
+                                click_refresh_on_order_status(d)
+                        except Exception:
+                            pass
                     else:
                         if reason == "NOT_READY" and retry < AUTH_RETRY_MAX:
                             retry += 1
