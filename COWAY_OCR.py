@@ -32,9 +32,10 @@ DIGITAL_SALES_PACKAGE = ""   # 패키지명 알면 넣으면 더 안정적(모�
 # ===========================
 # 주기/안전 옵션
 # ===========================
-SIGN_SCAN_INTERVAL_SEC = 20    # 인증완료 스캔 주기
-STOP_ON_ERROR = True           # 예상 밖 오류면 중단
-AUTH_RETRY_MAX = 5             # 인증발송 화면복구 재시도 횟수
+SIGN_SCAN_INTERVAL_SEC = 20      # 인증완료 스캔 주기
+ORDER_REFRESH_INTERVAL_SEC = 60  # ✅ Idle일 때 주문현황 새로고침 주기(1분)
+STOP_ON_ERROR = True
+AUTH_RETRY_MAX = 5
 
 # ===========================
 # 크롬 옵션
@@ -92,56 +93,6 @@ def phone11_to_display(phone11: str) -> str:
     if not phone11 or len(phone11) != 11:
         return ""
     return f"{phone11[0:3]}-{phone11[3:7]}-{phone11[7:11]}"
-
-def normalize_model_code(s: str) -> str:
-    raw = (str(s or "").strip().upper()).replace(" ", "")
-    # CHPI-7430N 같은 패턴 우선 추출
-    m = re.search(r"[A-Z]{2,}[A-Z0-9]*-\d+[A-Z0-9]*", raw)
-    if m:
-        return m.group(0)
-    # 하이픈 없는 케이스도 대응
-    m2 = re.search(r"[A-Z]{2,}\d+[A-Z0-9]*", raw)
-    if m2:
-        return m2.group(0)
-    return raw
-
-def normalize_color_raw(s: str) -> str:
-    return (str(s or "").strip()).replace(" ", "")
-
-def color_rule_and_keyword(color_raw: str):
-    """
-    올앤업 색상 -> 앱 검색결과 색상 판단 규칙
-    반환: (mode, keyword)
-      mode:
-        - "contains": keyword 포함이면 OK (화이트/블루/핑크/베이지 등)
-        - "ambiguous_gray": 올앤업이 '그레이'처럼 애매하면 절대 진행 금지(중단)
-        - "exact": keyword가 그대로 포함되어야 함
-    """
-    c = normalize_color_raw(color_raw)
-
-    if not c:
-        return ("exact", "")
-
-    # 자주 나오는 색상 카테고리
-    if "화이트" in c:
-        return ("contains", "화이트")  # 아이스 화이트 OK
-    if "블루" in c:
-        return ("contains", "블루")
-    if "핑크" in c:
-        return ("contains", "핑크")
-    if "베이지" in c:
-        return ("contains", "베이지")
-
-    # 그레이는 위험: 페블/차콜/아이스 등으로 갈릴 수 있음
-    if "그레이" in c:
-        # 올앤업에서 '페블그레이/차콜그레이/아이스그레이'처럼 구체적으로 적힌 경우만 진행 가능
-        if any(k in c for k in ["페블", "차콜", "아이스"]):
-            # 예: 페블그레이 -> keyword=페블 (또는 전체 문자열 포함)
-            return ("contains", c)  # 구체 문자열 포함이면 OK
-        return ("ambiguous_gray", "그레이")
-
-    # 그 외는 그대로 포함되어야 함
-    return ("contains", c)
 
 # ===========================
 # 모달(라벨 기반) 값 추출
@@ -245,13 +196,7 @@ def extract_fields_from_modal(modal):
     account = find_input_near_label(modal, ["계좌", "은행", "계좌번호", "결제정보", "결제"])
     zipcode = find_input_near_label(modal, ["우편번호", "우편", "ZIP", "postcode"])
 
-    # ✅ 전자서명 단계에 필요한 값 추가
-    model_raw = find_input_near_label(modal, ["모델명", "모델", "제품코드", "상품코드"])
-    color_raw = find_input_near_label(modal, ["색상", "컬러"])
-
     phone11 = normalize_phone11_only_010(phone_raw)
-    model_code = normalize_model_code(model_raw)
-    color_norm = normalize_color_raw(color_raw)
 
     return {
         "name": (name or "").strip(),
@@ -260,10 +205,6 @@ def extract_fields_from_modal(modal):
         "phone11": (phone11 or "").strip(),
         "account": (account or "").strip(),
         "zipcode": (zipcode or "").strip(),
-        "model_raw": (model_raw or "").strip(),
-        "model_code": (model_code or "").strip(),
-        "color_raw": (color_raw or "").strip(),
-        "color_norm": (color_norm or "").strip(),
     }
 
 # ===========================
@@ -298,7 +239,6 @@ def click_first_clickable_text(d, txt: str) -> bool:
     return False
 
 def open_digital_sales_app(d) -> bool:
-    # 앱 내부로 보이면 OK
     if d(text="모바일 주문").exists or d(text="전체메뉴").exists or d(text="라이프스토리").exists:
         return True
 
@@ -325,7 +265,6 @@ def open_digital_sales_app(d) -> bool:
     return False
 
 def ensure_on_mobile_order_home(d) -> bool:
-    # 목표: 모바일 주문 화면(일반 주문하기 보이는 화면)
     for _ in range(3):
         if d(text="일반 주문하기").exists:
             return True
@@ -352,7 +291,6 @@ def ensure_on_order_status_screen(d):
     return d(text="주문현황").exists
 
 def goto_order_status(d) -> bool:
-    # 주문현황으로 이동: 모바일 주문 홈 복구 → 일반주문 클릭
     if ensure_on_order_status_screen(d):
         return True
     if not ensure_on_mobile_order_home(d):
@@ -363,15 +301,150 @@ def goto_order_status(d) -> bool:
         return ensure_on_order_status_screen(d)
     return False
 
-def try_click_auth_done_item(d) -> bool:
-    # 주문현황 리스트에서 '인증완료' 하나 클릭
-    if not ensure_on_order_status_screen(d):
-        return False
-    if d(text="인증완료").exists:
-        click_first_clickable_text(d, "인증완료")
+def click_refresh_on_order_status(d) -> bool:
+    """
+    ✅ 주문현황 우측 새로고침(원형 화살표) 클릭
+    텍스트가 없을 수 있으니:
+    1) content-desc 후보
+    2) 우측 상단 영역의 클릭 가능한 아이콘 탐색
+    3) 최후: 리스트 상단에서 살짝 당겨 새로고침(swipe)
+    """
+    # 1) description 후보
+    for desc in ["새로고침", "refresh", "Refresh", "갱신"]:
+        try:
+            if d(description=desc).exists:
+                d(description=desc).click()
+                time.sleep(0.6)
+                return True
+        except Exception:
+            pass
+
+    # 2) 우측 상단 영역 클릭 가능한 아이콘 탐색
+    try:
+        w, h = d.window_size()
+        cand = d(clickable=True).all()
+        best = None
+        for o in cand:
+            try:
+                info = o.info
+                b = info.get("bounds", {})
+                left = b.get("left", 0)
+                top = b.get("top", 0)
+                right = b.get("right", 0)
+                bottom = b.get("bottom", 0)
+
+                # 우측(> 85%) + 상단(대략 12%~35%) 영역
+                if right >= int(w * 0.85) and top >= int(h * 0.12) and top <= int(h * 0.35):
+                    # 너무 큰 버튼(예: 전체영역) 제외
+                    if (right - left) <= int(w * 0.35) and (bottom - top) <= int(h * 0.25):
+                        best = o
+                        break
+            except Exception:
+                continue
+
+        if best is not None:
+            best.click()
+            time.sleep(0.6)
+            return True
+    except Exception:
+        pass
+
+    # 3) pull-to-refresh(최후)
+    try:
+        w, h = d.window_size()
+        d.swipe(int(w * 0.5), int(h * 0.18), int(w * 0.5), int(h * 0.55), 0.15)
         time.sleep(0.8)
         return True
+    except Exception:
+        return False
+
+def ensure_filter_auth_done(d) -> bool:
+    """
+    ✅ 진행상태 필터를 '인증완료'로 맞춘다.
+    - '진행상태' 버튼이 있으면 눌러서 '인증완료' 선택
+    - 이미 '인증완료' 필터가 걸려있으면 그대로
+    """
+    # 이미 필터 버튼이 "인증완료"로 보이는 경우(상단 칩)
+    # (리스트의 인증완료 버튼과 겹칠 수 있어, 상단 영역 클릭 대상으로만 판단)
+    try:
+        w, h = d.window_size()
+        objs = d(text="인증완료").all()
+        for o in objs:
+            try:
+                info = o.info
+                b = info.get("bounds", {})
+                top = b.get("top", 999999)
+                # 상단 영역(대략 12%~35%)에 있는 인증완료 텍스트는 필터 칩일 가능성이 큼
+                if top >= int(h * 0.12) and top <= int(h * 0.35):
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # 진행상태 버튼 클릭
+    if d(text="진행상태").exists:
+        click_first_clickable_text(d, "진행상태")
+        time.sleep(0.5)
+        if d(text="인증완료").exists:
+            click_first_clickable_text(d, "인증완료")
+            time.sleep(0.6)
+            return True
+        return False
+
+    # 진행상태가 안 보이면, 상단에 있는 인증완료 칩을 눌러 메뉴를 열어보는 시도
+    # (없으면 False)
+    try:
+        w, h = d.window_size()
+        objs = d(text="인증완료").all()
+        for o in objs:
+            try:
+                info = o.info
+                b = info.get("bounds", {})
+                top = b.get("top", 999999)
+                if top >= int(h * 0.12) and top <= int(h * 0.35):
+                    o.click()
+                    time.sleep(0.5)
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+
     return False
+
+def click_auth_done_item_in_list(d) -> bool:
+    """
+    ✅ 인증완료 리스트 항목(핑크)을 눌러 상세로 진입
+    필터 칩과 겹치므로, '리스트 영역'에 있는 인증완료 버튼만 클릭한다.
+    """
+    if not ensure_on_order_status_screen(d):
+        return False
+
+    try:
+        w, h = d.window_size()
+        objs = d(text="인증완료").all()
+        buttons = []
+        for o in objs:
+            try:
+                info = o.info
+                b = info.get("bounds", {})
+                top = b.get("top", 0)
+                # 리스트 영역(대략 35% 이후)만 대상으로
+                if top >= int(h * 0.35):
+                    buttons.append((top, o))
+            except Exception:
+                continue
+
+        buttons.sort(key=lambda x: x[0])
+        if not buttons:
+            return False
+
+        buttons[0][1].click()
+        time.sleep(0.8)
+        return True
+    except Exception:
+        return False
 
 def match_detail_by_name_phone(d, name: str, phone11: str) -> bool:
     phone_disp = phone11_to_display(phone11)
@@ -393,123 +466,6 @@ def back_to_order_list(d) -> bool:
         d.press("back")
         time.sleep(0.5)
     return ensure_on_order_status_screen(d)
-
-def wait_for_product_search_screen(d) -> bool:
-    # 3번 캡처: 주문접수/상품검색/검색 버튼이 보이면 OK
-    for _ in range(40):
-        if d(text="상품검색").exists and d(text="검색").exists:
-            return True
-        time.sleep(0.2)
-    return False
-
-def do_product_search(d, model_code: str) -> bool:
-    # 상품검색 화면에서 모델명 입력 후 검색
-    edits = d(className="android.widget.EditText")
-    if edits.count < 1:
-        return False
-
-    edits[0].click()
-    time.sleep(0.1)
-    edits[0].set_text(model_code)
-    time.sleep(0.2)
-
-    if d(text="검색").exists:
-        click_first_clickable_text(d, "검색")
-        time.sleep(0.8)
-        return True
-
-    return False
-
-def collect_model_lines(d, model_code: str):
-    """
-    결과 리스트에서 model_code가 들어있는 '라인 텍스트'들을 수집
-    예: "CHPI-7430N_WT, 113981, 아이스 화이트"
-    """
-    items = []
-    try:
-        nodes = d(textContains=model_code).all()
-    except Exception:
-        nodes = []
-
-    for n in nodes:
-        try:
-            t = (n.get_text() or "").strip()
-            if not t:
-                continue
-            if model_code not in t:
-                continue
-            items.append((t, n))
-        except Exception:
-            continue
-
-    # 중복 제거(텍스트 기준)
-    uniq = {}
-    for t, n in items:
-        uniq[t] = n
-    return [(t, uniq[t]) for t in uniq.keys()]
-
-def parse_model_line(line_text: str):
-    """
-    "CHPI-7430N_WT, 113981, 아이스 화이트" -> (model_token, color_text)
-    """
-    parts = [p.strip() for p in line_text.split(",")]
-    model_token = parts[0] if len(parts) >= 1 else ""
-    color_text = parts[-1] if len(parts) >= 2 else ""
-    return model_token, color_text
-
-def choose_one_product_candidate(model_code: str, color_raw: str, lines):
-    """
-    lines: [(line_text, node), ...]
-    안전 규칙:
-    - model_token은 model_code로 시작해야 함
-    - 색상 규칙:
-      - 화이트/핑크/블루/베이지: 포함이면 OK
-      - 그레이(애매): 올앤업이 '그레이'만이면 즉시 중단
-    - 최종 후보가 1개일 때만 진행, 아니면 중단
-    """
-    mode, keyword = color_rule_and_keyword(color_raw)
-
-    # 그레이 애매하면 무조건 중단
-    if mode == "ambiguous_gray":
-        return ("STOP", f"색상 애매(올앤업='{color_raw}') → 그레이 계열은 자동 선택 금지", None, None)
-
-    candidates = []
-    for line_text, node in lines:
-        model_token, color_text = parse_model_line(line_text)
-
-        if not model_token.startswith(model_code):
-            continue
-
-        ct = (color_text or "").replace(" ", "")
-        if keyword:
-            kw = keyword.replace(" ", "")
-            if kw not in ct:
-                continue
-
-        candidates.append((line_text, node, model_token, color_text))
-
-    if len(candidates) == 0:
-        return ("STOP", f"검색 결과에 일치 항목 없음 (model={model_code}, color='{color_raw}')", None, None)
-
-    # 2개 이상이면 위험 → 중단
-    if len(candidates) >= 2:
-        # 어떤 후보가 있었는지 메시지로 남김
-        preview = " | ".join([c[0] for c in candidates[:5]])
-        return ("STOP", f"일치 후보가 {len(candidates)}개로 애매함 → 중단. 후보: {preview}", None, None)
-
-    return ("OK", "선택 가능", candidates[0][1], candidates[0][0])
-
-def click_candidate_node(node) -> bool:
-    try:
-        node.click()
-        return True
-    except Exception:
-        try:
-            # 클릭 실패 시 좌표 클릭(그래도 UI요소 기반)
-            node.click_exists(timeout=0.1)
-            return True
-        except Exception:
-            return False
 
 def send_auth_request(d, name: str, phone11: str):
     """
@@ -560,7 +516,6 @@ def send_auth_request(d, name: str, phone11: str):
     if not clicked_auth:
         return (False, "NO_AUTH_BTN")
 
-    # 확인 팝업 [발송] 클릭
     send_clicked = False
     for _ in range(40):
         if d(text="발송").exists:
@@ -574,21 +529,22 @@ def send_auth_request(d, name: str, phone11: str):
 
 def try_start_sign_flow(d) -> bool:
     """
-    전자서명(B) - 여기까지 구현:
-    1) 주문현황에서 인증완료 진입
-    2) 상세 화면에서 이름+전화번호 일치 확인(필수)
-    3) 주문 이어서 하기 클릭
-    4) 상품검색 화면에서 모델코드 검색
-    5) 결과에서 모델/색상 조건이 '딱 1개'일 때만 클릭
-    6) 다음 단계 미구현 → 안전 중단
+    전자서명(B) 시작점:
+    - 주문현황 진입
+    - 필터를 인증완료로 맞춤
+    - 리스트에서 인증완료 항목 하나 진입
+    - 상세에서 이름+전화번호 일치할 때만 '주문 이어서 하기'
     """
     if not goto_order_status(d):
         return False
 
-    if not try_click_auth_done_item(d):
+    if not ensure_filter_auth_done(d):
+        # 필터를 못 맞추면 진행 금지
         return False
 
-    # 상세 화면에서 우리 건 매칭
+    if not click_auth_done_item_in_list(d):
+        return False
+
     matched_phone = ""
     matched_job = None
 
@@ -605,67 +561,20 @@ def try_start_sign_flow(d) -> bool:
         back_to_order_list(d)
         return False
 
-    # 주문 이어서 하기
-    if not click_order_continue(d):
+    ok = click_order_continue(d)
+    if not ok:
         if STOP_ON_ERROR:
             set_stop("인증완료 상세에서 '주문 이어서 하기' 버튼을 못 찾음")
         return False
 
-    # 상품검색 화면 대기
-    if not wait_for_product_search_screen(d):
-        if STOP_ON_ERROR:
-            set_stop("상품검색 화면 진입 실패(시간초과)")
-        return False
-
-    model_code = normalize_model_code(matched_job.get("model_code", ""))
-    color_raw = matched_job.get("color_raw", "")
-
-    if not model_code:
-        set_stop(f"올앤업 모델명 없음 → 중단 (phone={matched_phone})")
-        return False
-
-    # 모델 검색
-    ok_search = do_product_search(d, model_code)
-    if not ok_search:
-        set_stop(f"상품검색 입력/검색 실패 → 중단 (model={model_code})")
-        return False
-
-    # 결과 대기: model_code가 화면에 뜰 때까지
-    found = False
-    for _ in range(60):
-        if d(textContains=model_code).exists:
-            found = True
-            break
-        time.sleep(0.2)
-
-    if not found:
-        set_stop(f"검색 결과에 모델이 안 보임 → 중단 (model={model_code})")
-        return False
-
-    # 모델 라인 수집 및 후보 선택
-    lines = collect_model_lines(d, model_code)
-    status, msg, node, picked_line = choose_one_product_candidate(model_code, color_raw, lines)
-
-    if status != "OK":
-        set_stop(msg)
-        return False
-
-    # 최종 클릭
-    clicked = click_candidate_node(node)
-    if not clicked:
-        set_stop(f"상품 후보 클릭 실패 → 중단 (line={picked_line})")
-        return False
-
-    # 중복 방지 기록
     with jobs_lock:
         sign_started.add(matched_phone)
 
-    notify(f"상품 선택 완료(다음 단계 미구현으로 중단): {matched_job.get('name','')} / {matched_phone} / {model_code} / {color_raw}")
-    set_stop("안전 중단: 상품 선택까지 완료. 다음 단계(약정/관리/전자서명)는 아직 미구현.")
+    notify(f"전자서명 단계 진입: {matched_job.get('name','')} / {matched_phone}")
     return True
 
 # ===========================
-# 에뮬레이터 단일 워커 (겹침 방지 핵심)
+# 에뮬레이터 단일 워커 (겹침 방지)
 # ===========================
 def emulator_main_loop():
     if not DO_EMULATOR:
@@ -677,6 +586,7 @@ def emulator_main_loop():
     print("✅ 에뮬레이터 연결 완료:", ADB_SERIAL)
 
     last_sign_scan = 0.0
+    last_refresh = 0.0
 
     while True:
         try:
@@ -684,8 +594,19 @@ def emulator_main_loop():
                 time.sleep(1.0)
                 continue
 
-            # 1) 전자서명(B) 스캔 우선
+            # ✅ Idle 판정: 인증발송 큐가 비어있고, 지금 루프에서 인증발송/전자서명 작업을 수행하지 않을 때만 새로고침
+            auth_pending = not auth_q.empty()
+
             now = time.time()
+
+            # 0) Idle 상태에서 1분마다 주문현황 새로고침 (작업 중이면 절대 안 함)
+            if (not auth_pending) and (now - last_refresh >= ORDER_REFRESH_INTERVAL_SEC):
+                if goto_order_status(d):
+                    if ensure_filter_auth_done(d):
+                        click_refresh_on_order_status(d)
+                last_refresh = now
+
+            # 1) 전자서명(B) 스캔 (20초 주기)
             if now - last_sign_scan >= SIGN_SCAN_INTERVAL_SEC:
                 last_sign_scan = now
                 try_start_sign_flow(d)
@@ -793,10 +714,6 @@ while True:
         account = data.get("account", "")
         zipcode = data.get("zipcode", "")
 
-        model_raw = data.get("model_raw", "")
-        model_code = data.get("model_code", "")
-        color_raw = data.get("color_raw", "")
-
         if not phone11:
             print("❌ 전화번호(라벨 기반) 추출 실패 → 오인 방지로 건너뜀")
             debug_modal_inputs(modal)
@@ -814,9 +731,6 @@ while True:
         print("생년월일:", birth)
         print("전화번호(11):", phone11)
         print("전화번호 원문:", phone_raw)
-        print("모델명 원문:", model_raw)
-        print("모델코드:", model_code)
-        print("색상:", color_raw)
         print("계좌:", account)
         print("우편번호:", zipcode)
         print("-" * 40)
@@ -827,9 +741,6 @@ while True:
             "birth": birth,
             "account": account,
             "zipcode": zipcode,
-            "model_raw": model_raw,
-            "model_code": model_code,
-            "color_raw": color_raw,
             "_retry": 0,
         })
 
