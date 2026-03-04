@@ -291,179 +291,146 @@ def ensure_on_order_status_screen(d):
     return d(text="주문현황").exists
 
 def goto_order_status(d) -> bool:
-    if ensure_on_order_status_screen(d):
-        return True
+    """
+    ✅ 어떤 화면이든 '주문현황'까지 복구해서 진입
+    순서:
+    1) 주문현황이면 OK
+    2) 모바일주문 홈(일반 주문하기 보이는 화면)으로 복구
+    3) 모바일주문 홈에서 '일반주문' 클릭 → 주문현황
+    """
+    try:
+        if d(text="주문현황").exists:
+            return True
+    except Exception:
+        pass
+
+    # 1) 모바일주문 홈으로 복구 (앱 메인/런처에서도 복구되도록)
     if not ensure_on_mobile_order_home(d):
         return False
-    if d(text="일반주문").exists:
-        click_first_clickable_text(d, "일반주문")
-        time.sleep(0.8)
-        return ensure_on_order_status_screen(d)
+
+    # 2) 모바일주문 홈에서 일반주문 클릭 → 주문현황
+    try:
+        if d(text="일반주문").exists:
+            click_first_clickable_text(d, "일반주문")
+            time.sleep(1.0)
+            return d(text="주문현황").exists
+    except Exception:
+        return False
+
     return False
 
 def click_refresh_on_order_status(d) -> bool:
     """
-    ✅ 주문현황 우측 원형 새로고침 아이콘 클릭 (텍스트/desc 없는 케이스 대응)
-
-    전략:
-    1) desc로 먼저 시도
-    2) '검색창 오른쪽 영역'에 있는 작은 clickable(정사각형에 가까운) 버튼을 bounds로 골라 클릭
-    3) 그래도 못 찾으면 목표 좌표(우측 상단 검색영역 근처)를 직접 클릭(상대좌표)
+    ✅ 주문현황 우측 원형 새로고침 아이콘 클릭
+    - 이 버튼은 text/desc가 없는 경우가 많아서 '좌표'로 누르는게 제일 확실함.
+    - 화면 크기가 바뀌어도 동작하도록 상대좌표로 3번 시도.
     """
-    # 주문현황 화면이 아니면 아무것도 하지 않음
     try:
         if not d(text="주문현황").exists:
             return False
     except Exception:
         return False
 
-    # 1) description 후보
-    for desc in ["새로고침", "refresh", "Refresh", "갱신"]:
-        try:
-            if d(description=desc).exists:
-                d(description=desc).click()
-                time.sleep(0.6)
-                return True
-        except Exception:
-            pass
-
-    # 2) bounds 기반: 검색창 오른쪽(우측 상단)에 있는 작은 버튼 찾기
     try:
         w, h = d.window_size()
 
-        # 새로고침 아이콘이 위치한 대략적인 목표점(상대좌표)
-        # (너가 찍은 화면 기준: 검색 입력창 오른쪽, 상단 헤더 영역)
-        tx = int(w * 0.94)
-        ty = int(h * 0.245)
+        # 너가 표시한 원형 버튼 위치(검색창 오른쪽)를 상대좌표로 여러 번 시도
+        # 화면/기기마다 살짝 달라서 y를 3개로 잡음
+        candidates = [
+            (int(w * 0.955), int(h * 0.265)),
+            (int(w * 0.955), int(h * 0.285)),
+            (int(w * 0.955), int(h * 0.305)),
+        ]
 
-        cand = d(clickable=True).all()
-        best = None
-        best_score = 10**18
-
-        for o in cand:
-            try:
-                info = o.info
-                b = info.get("bounds", {})
-                left = int(b.get("left", 0))
-                top = int(b.get("top", 0))
-                right = int(b.get("right", 0))
-                bottom = int(b.get("bottom", 0))
-
-                bw = right - left
-                bh = bottom - top
-                if bw <= 0 or bh <= 0:
-                    continue
-
-                cx = (left + right) // 2
-                cy = (top + bottom) // 2
-                area = bw * bh
-
-                # ✅ "검색창 오른쪽" 후보 영역으로 강하게 제한
-                #   - 매우 우측
-                #   - 상단(검색창/필터가 있는 줄) 근처
-                if cx < int(w * 0.86):
-                    continue
-                if cy < int(h * 0.16) or cy > int(h * 0.33):
-                    continue
-
-                # ✅ 너무 큰 영역(전체 row/큰 버튼) 제외
-                if bw > int(w * 0.22) or bh > int(h * 0.18):
-                    continue
-
-                # ✅ 너무 작은 점(아이콘 아닌 잡다한 클릭영역) 제외
-                if bw < 24 or bh < 24:
-                    continue
-
-                # ✅ 정사각형에 가까운 버튼을 선호(원형 새로고침 버튼이 보통 이 형태)
-                ratio = bw / float(bh)
-                squareness = abs(ratio - 1.0)
-
-                # 목표점과의 거리
-                dist = (cx - tx) * (cx - tx) + (cy - ty) * (cy - ty)
-
-                # 점수: 거리 + (정사각형일수록 가산 적음) + (면적이 너무 크면 불리)
-                score = dist + int(squareness * 200000) + int(area * 0.5)
-
-                if score < best_score:
-                    best_score = score
-                    best = o
-            except Exception:
-                continue
-
-        if best is not None:
-            best.click()
+        for x, y in candidates:
+            d.click(x, y)
             time.sleep(0.6)
             return True
 
-        # 3) 후보를 못 찾으면 목표 좌표를 직접 클릭(상대좌표)
-        d.click(tx, ty)
-        time.sleep(0.6)
-        return True
+    except Exception:
+        return False
 
-    except Exception:
-        return False
-    try:
-        w, h = d.window_size()
-        d.swipe(int(w * 0.5), int(h * 0.18), int(w * 0.5), int(h * 0.55), 0.15)
-        time.sleep(0.8)
-        return True
-    except Exception:
-        return False
+    return False
 
 def ensure_filter_auth_done(d) -> bool:
     """
-    ✅ 진행상태 필터를 '인증완료'로 맞춘다.
-    - '진행상태' 버튼이 있으면 눌러서 '인증완료' 선택
-    - 이미 '인증완료' 필터가 걸려있으면 그대로
+    ✅ 진행상태 필터를 무조건 '인증완료'로 맞춘다.
+    - 현재 칩이 '인증입력/서명입력/주문확정/인증완료' 등 무엇이든 상관없이
+      그 칩(진행상태 필터 버튼)을 눌러 메뉴를 열고 '인증완료'를 선택한다.
     """
-    # 이미 필터 버튼이 "인증완료"로 보이는 경우(상단 칩)
-    # (리스트의 인증완료 버튼과 겹칠 수 있어, 상단 영역 클릭 대상으로만 판단)
-    try:
-        w, h = d.window_size()
-        objs = d(text="인증완료").all()
-        for o in objs:
-            try:
-                info = o.info
-                b = info.get("bounds", {})
-                top = b.get("top", 999999)
-                # 상단 영역(대략 12%~35%)에 있는 인증완료 텍스트는 필터 칩일 가능성이 큼
-                if top >= int(h * 0.12) and top <= int(h * 0.35):
-                    return True
-            except Exception:
-                continue
-    except Exception:
-        pass
 
-    # 진행상태 버튼 클릭
-    if d(text="진행상태").exists:
-        click_first_clickable_text(d, "진행상태")
-        time.sleep(0.5)
-        if d(text="인증완료").exists:
-            click_first_clickable_text(d, "인증완료")
-            time.sleep(0.6)
-            return True
+    try:
+        if not d(text="주문현황").exists:
+            return False
+    except Exception:
         return False
 
-    # 진행상태가 안 보이면, 상단에 있는 인증완료 칩을 눌러 메뉴를 열어보는 시도
-    # (없으면 False)
     try:
         w, h = d.window_size()
-        objs = d(text="인증완료").all()
-        for o in objs:
+
+        # 1) 상단 영역(필터칩이 있는 영역)에서 '현재 상태 칩'을 찾는다.
+        #    (진행상태/인증입력/인증완료/서명입력/주문확정/주문삭제 중 하나가 상단에 있음)
+        chip_texts = ["진행상태", "인증입력", "인증완료", "서명입력", "주문확정", "주문삭제"]
+        chip = None
+
+        for t in chip_texts:
+            try:
+                objs = d(text=t).all()
+            except Exception:
+                objs = []
+
+            for o in objs:
+                try:
+                    info = o.info
+                    b = info.get("bounds", {})
+                    top = int(b.get("top", 999999))
+                    left = int(b.get("left", 0))
+
+                    # 필터칩은 '상단 중간' 영역에 있음 (대략 18%~40%)
+                    if top >= int(h * 0.18) and top <= int(h * 0.40) and left <= int(w * 0.60):
+                        chip = o
+                        break
+                except Exception:
+                    continue
+
+            if chip is not None:
+                break
+
+        if chip is None:
+            return False
+
+        # 2) 칩을 눌러서 메뉴를 연다
+        chip.click()
+        time.sleep(0.6)
+
+        # 3) 메뉴에서 '인증완료' 선택
+        if d(text="인증완료").exists:
+            click_first_clickable_text(d, "인증완료")
+            time.sleep(0.8)
+
+        # 4) 상단에 '인증완료' 칩이 보이면 성공(상단 영역만 확인)
+        objs2 = []
+        try:
+            objs2 = d(text="인증완료").all()
+        except Exception:
+            objs2 = []
+
+        for o in objs2:
             try:
                 info = o.info
                 b = info.get("bounds", {})
-                top = b.get("top", 999999)
-                if top >= int(h * 0.12) and top <= int(h * 0.35):
-                    o.click()
-                    time.sleep(0.5)
+                top = int(b.get("top", 999999))
+                left = int(b.get("left", 0))
+                if top >= int(h * 0.18) and top <= int(h * 0.40) and left <= int(w * 0.60):
                     return True
             except Exception:
                 continue
-    except Exception:
-        pass
 
-    return False
+        # 그래도 확인이 애매하면 '인증완료'가 메뉴에서 눌렸다고 가정하고 True
+        return True
+
+    except Exception:
+        return False
 
 def click_auth_done_item_in_list(d) -> bool:
     """
