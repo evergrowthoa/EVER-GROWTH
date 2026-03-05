@@ -11,30 +11,18 @@ import traceback
 
 import uiautomator2 as u2
 
-BUILD_ID = "COWAY_OCR_BUILD_2026-03-05_005"
+BUILD_ID = "COWAY_OCR_BUILD_2026-03-05_006"
 print("✅ BUILD:", BUILD_ID)
 
-# ===========================
-# 로그인 정보
-# ===========================
 USER_ID = "evergrowth"
 USER_PW = "wkrlfjqm1!"
 
-# ===========================
-# 에뮬레이터 설정
-# ===========================
 ADB_SERIAL = "emulator-5554"
 DO_EMULATOR = True
 
-# ===========================
-# 디지털세일즈 앱 설정
-# ===========================
 DIGITAL_SALES_APP_NAME = "디지털세일즈"
-DIGITAL_SALES_PACKAGE = ""   # 패키지명 알면 넣으면 더 안정적
+DIGITAL_SALES_PACKAGE = ""
 
-# ===========================
-# 운영 옵션
-# ===========================
 STOP_ON_ERROR = True
 AUTH_RETRY_MAX = 3
 
@@ -42,9 +30,6 @@ ORDER_REENTER_INTERVAL_SEC = 90
 SEARCH_BATCH_PER_CYCLE = 3
 SEARCH_LOOP_SLEEP_SEC = 2.0
 
-# ===========================
-# 크롬 옵션
-# ===========================
 chrome_options = Options()
 chrome_options.add_argument("--start-maximized")
 chrome_options.add_experimental_option("detach", True)
@@ -52,22 +37,12 @@ chrome_options.add_experimental_option("detach", True)
 driver = webdriver.Chrome(options=chrome_options)
 wait = WebDriverWait(driver, 20)
 
-# ===========================
-# 작업 큐 (웹 → 에뮬레이터)
-# ===========================
 auth_q = queue.Queue()
-
-# 인증발송 성공한 건(대기목록)
 auth_sent_jobs = {}
 jobs_lock = threading.Lock()
-
-# 전자서명 진입(중복 방지)
 sign_started = set()
 
-# 전자서명 진행중이면 인증발송 후순위
 SIGN_IN_PROGRESS = False
-
-# 중단 플래그
 STOP_FLAG = False
 
 def notify(msg: str):
@@ -79,9 +54,6 @@ def set_stop(reason: str):
     print("🛑 자동화 중단:", reason)
     notify(reason)
 
-# ===========================
-# 유틸
-# ===========================
 def normalize_digits(s: str) -> str:
     return re.sub(r"\D", "", str(s or ""))
 
@@ -101,7 +73,6 @@ def phone11_to_display(phone11: str) -> str:
 def compute_check_interval(auth_sent_at: float) -> int:
     now = time.time()
     elapsed = max(0, now - auth_sent_at)
-
     if elapsed < 10 * 60:
         return 120
     if elapsed < 60 * 60:
@@ -112,9 +83,9 @@ def compute_check_interval(auth_sent_at: float) -> int:
         return 1800
     return 3600
 
-# ===========================
-# Selenium: 모달 추출
-# ===========================
+# ---------------------------
+# Selenium modal
+# ---------------------------
 DEBUG_MODAL_ON_FAIL = True
 _last_debug_ts = 0.0
 
@@ -225,9 +196,9 @@ def extract_fields_from_modal(modal):
         "zipcode": (zipcode or "").strip(),
     }
 
-# ===========================
-# uiautomator2: 공통 클릭/앱 이동
-# ===========================
+# ---------------------------
+# uiautomator2 helpers
+# ---------------------------
 def connect_emulator():
     d = u2.connect(ADB_SERIAL)
     d.implicitly_wait(5.0)
@@ -257,6 +228,79 @@ def click_text_center(d, txt: str, y_min_ratio: float = 0.0, y_max_ratio: float 
     except Exception:
         return False
     return False
+
+def enable_fast_ime(d):
+    try:
+        d.set_fastinput_ime(True)
+    except Exception:
+        pass
+
+def type_into_edittext(d, edit_obj, text: str) -> bool:
+    """
+    ✅ 한글 포함 입력 안정화:
+    1) set_text 시도 + 검증
+    2) fast IME send_keys + 검증
+    3) 클립보드 붙여넣기 + 검증
+    """
+    try:
+        b = edit_obj.info.get("bounds", {})
+        cx = (int(b.get("left", 0)) + int(b.get("right", 0))) // 2
+        cy = (int(b.get("top", 0)) + int(b.get("bottom", 0))) // 2
+        d.click(cx, cy)
+        time.sleep(0.1)
+
+        # 1) set_text
+        try:
+            edit_obj.set_text(text)
+            time.sleep(0.2)
+            got = ""
+            try:
+                got = (edit_obj.get_text() or "").strip()
+            except Exception:
+                got = ""
+            if got and (text in got or got == text):
+                return True
+        except Exception:
+            pass
+
+        # 2) fast IME send_keys
+        enable_fast_ime(d)
+        try:
+            d.send_keys(text, clear=True)
+            time.sleep(0.2)
+            got = ""
+            try:
+                got = (edit_obj.get_text() or "").strip()
+            except Exception:
+                got = ""
+            if got and (text in got or got == text):
+                return True
+        except Exception:
+            pass
+
+        # 3) clipboard paste
+        try:
+            d.set_clipboard(text)
+            time.sleep(0.1)
+            # 길게 눌러 붙여넣기 메뉴 호출
+            d.long_click(cx, cy, 0.5)
+            time.sleep(0.3)
+            if d(text="붙여넣기").exists:
+                d(text="붙여넣기").click()
+                time.sleep(0.3)
+            got = ""
+            try:
+                got = (edit_obj.get_text() or "").strip()
+            except Exception:
+                got = ""
+            if got and (text in got or got == text):
+                return True
+        except Exception:
+            pass
+
+        return False
+    except Exception:
+        return False
 
 def restart_digital_sales_app(d) -> bool:
     try:
@@ -299,6 +343,28 @@ def ensure_mobile_order_home(d) -> bool:
                 return True
         time.sleep(0.4)
     return d(text="일반 주문하기").exists
+
+def is_tab_selected(d, tab_text: str) -> bool:
+    try:
+        for o in d(text=tab_text).all():
+            try:
+                info = o.info
+                if info.get("selected") or info.get("checked"):
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        return False
+    return False
+
+def ensure_general_tab(d) -> bool:
+    if not d(text="주문현황").exists:
+        return False
+    if is_tab_selected(d, "일반"):
+        return True
+    click_text_center(d, "일반", 0.08, 0.22)
+    time.sleep(0.4)
+    return True
 
 def enter_order_status(d) -> bool:
     if d(text="주문현황").exists:
@@ -344,7 +410,6 @@ def exit_order_status_to_mobile_home(d) -> bool:
         if ok:
             return True
 
-    # X가 안 먹히면 앱 재시작으로 리셋
     return restart_digital_sales_app(d) and ensure_mobile_order_home(d)
 
 def refresh_order_status_by_reenter(d) -> bool:
@@ -355,38 +420,9 @@ def refresh_order_status_by_reenter(d) -> bool:
         return False
     return enter_order_status(d)
 
-def is_tab_selected(d, tab_text: str) -> bool:
-    try:
-        for o in d(text=tab_text).all():
-            try:
-                info = o.info
-                if info.get("selected") or info.get("checked"):
-                    return True
-            except Exception:
-                continue
-    except Exception:
-        return False
-    return False
-
-def ensure_general_tab(d) -> bool:
-    """
-    ✅ 코라솔 절대 클릭 금지:
-    - 코라솔/청약이 selected면 '일반'만 눌러서 복구
-    """
-    if not d(text="주문현황").exists:
-        return False
-
-    if is_tab_selected(d, "일반"):
-        return True
-
-    # 코라솔이 선택돼 있어도 '일반'만 클릭 (코라솔 텍스트는 절대 클릭 안 함)
-    click_text_center(d, "일반", 0.08, 0.22)
-    time.sleep(0.4)
-    return True
-
-# ===========================
-# 주문현황: 검색 (드롭다운 절대 클릭 금지)
-# ===========================
+# ---------------------------
+# Search (드롭다운 클릭 금지)
+# ---------------------------
 def dismiss_search_mode_dropdown_if_open(d):
     try:
         if d(text="연락처").exists and d(text="고객/상호").exists:
@@ -398,7 +434,7 @@ def dismiss_search_mode_dropdown_if_open(d):
 
 def find_search_edittext(d):
     """
-    ✅ 가장 넓은 검색어 입력칸만 선택(드롭다운 아님)
+    ✅ 가장 넓은 검색어 입력(EditText) 선택
     """
     try:
         w, h = d.window_size()
@@ -414,6 +450,7 @@ def find_search_edittext(d):
                 bw = right - left
                 if top < int(h * 0.12) or top > int(h * 0.35):
                     continue
+                # 충분히 넓은 입력칸만
                 if bw < int(w * 0.40):
                     continue
                 if bw > best_w:
@@ -427,17 +464,24 @@ def find_search_edittext(d):
 
 def trigger_search(d, edit_obj):
     """
-    ✅ 돋보기는 '입력창 내부 오른쪽 끝'을 클릭(드롭다운/탭과 분리)
+    입력칸 오른쪽 끝을 클릭 + Enter
     """
     try:
         b = edit_obj.info.get("bounds", {})
         x = int(b.get("right", 0)) - 6
         y = (int(b.get("top", 0)) + int(b.get("bottom", 0))) // 2
         d.click(x, y)
-        time.sleep(0.6)
-        return True
+        time.sleep(0.3)
     except Exception:
-        return False
+        pass
+
+    try:
+        d.press("enter")
+        time.sleep(0.4)
+    except Exception:
+        pass
+
+    return True
 
 def get_first_status_badge_in_results(d):
     status_texts = ["인증완료", "인증입력", "서명입력", "주문확정", "주문삭제", "주문불가"]
@@ -504,16 +548,11 @@ def check_one_job_status_by_search(d, job: dict) -> str:
 
     query = job["name"]
 
-    try:
-        edit.click()
-        time.sleep(0.1)
-        edit.set_text(query)
-        time.sleep(0.3)
-    except Exception:
+    ok = type_into_edittext(d, edit, query)
+    if not ok:
         return ""
 
     trigger_search(d, edit)
-
     st, badge = get_first_status_badge_in_results(d)
     return st
 
@@ -530,12 +569,8 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
 
     query = job["name"]
 
-    try:
-        edit.click()
-        time.sleep(0.1)
-        edit.set_text(query)
-        time.sleep(0.3)
-    except Exception:
+    ok = type_into_edittext(d, edit, query)
+    if not ok:
         return False
 
     trigger_search(d, edit)
@@ -552,9 +587,9 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
     back_to_order_status(d)
     return False
 
-# ===========================
-# 인증발송(A)
-# ===========================
+# ---------------------------
+# 인증발송
+# ---------------------------
 def send_auth_request(d, job: dict):
     if not restart_digital_sales_app(d):
         return (False, "APP_RESTART_FAIL")
@@ -604,9 +639,9 @@ def send_auth_request(d, job: dict):
 
     return (True, "OK")
 
-# ===========================
-# 에뮬레이터 메인 루프
-# ===========================
+# ---------------------------
+# emulator loop
+# ---------------------------
 def emulator_main_loop():
     global SIGN_IN_PROGRESS
 
@@ -644,7 +679,7 @@ def emulator_main_loop():
                     if ok:
                         now = time.time()
                         job["auth_sent_at"] = now
-                        job["next_check_at"] = now + 60
+                        job["next_check_at"] = now + 10
                         job["last_check_at"] = 0.0
                         job["last_status"] = ""
                         with jobs_lock:
@@ -675,7 +710,7 @@ def emulator_main_loop():
 
             now = time.time()
 
-            # 3) 재진입 갱신(코라솔 방지 위해 진입 후 일반 탭 강제)
+            # 3) 재진입 갱신(가끔 코라솔로 가도 일반 탭 복구)
             if now - last_reenter >= ORDER_REENTER_INTERVAL_SEC:
                 refresh_order_status_by_reenter(d)
                 ensure_general_tab(d)
@@ -693,6 +728,8 @@ def emulator_main_loop():
             for j in batch:
                 if not auth_q.empty():
                     break
+
+                print("🔎 검색 시도:", j["name"])
 
                 st = check_one_job_status_by_search(d, j)
                 j["last_check_at"] = time.time()
@@ -757,14 +794,8 @@ driver.switch_to.frame(iframe)
 wait.until(EC.presence_of_element_located((By.TAG_NAME, "table")))
 print("\n📌 고객을 수동 클릭해서 모달을 띄우세요.\n")
 
-# ===========================
-# 3. 중복 방지
-# ===========================
 processed_phones = set()
 
-# ===========================
-# 4. 모달 감시 루프
-# ===========================
 while True:
     try:
         if STOP_FLAG:
