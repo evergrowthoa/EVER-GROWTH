@@ -11,7 +11,7 @@ import traceback
 
 import uiautomator2 as u2
 
-BUILD_ID = "COWAY_OCR_BUILD_2026-03-05_003"
+BUILD_ID = "COWAY_OCR_BUILD_2026-03-05_005"
 print("✅ BUILD:", BUILD_ID)
 
 # ===========================
@@ -28,10 +28,9 @@ DO_EMULATOR = True
 
 # ===========================
 # 디지털세일즈 앱 설정
-#  - 가능하면 패키지명을 넣어야 force-stop/app_start가 안정적
 # ===========================
 DIGITAL_SALES_APP_NAME = "디지털세일즈"
-DIGITAL_SALES_PACKAGE = ""   # 예: "com.xxx.yyy" (모르면 빈칸 유지)
+DIGITAL_SALES_PACKAGE = ""   # 패키지명 알면 넣으면 더 안정적
 
 # ===========================
 # 운영 옵션
@@ -39,13 +38,8 @@ DIGITAL_SALES_PACKAGE = ""   # 예: "com.xxx.yyy" (모르면 빈칸 유지)
 STOP_ON_ERROR = True
 AUTH_RETRY_MAX = 3
 
-# 주문현황 갱신(재진입) 주기
-ORDER_REENTER_INTERVAL_SEC = 90   # 60~180 추천
-
-# 검색 배치: 한 사이클에 몇 건만 검색할지(10~20건 있어도 2~3개씩만)
+ORDER_REENTER_INTERVAL_SEC = 90
 SEARCH_BATCH_PER_CYCLE = 3
-
-# 검색 루프 주기(너무 짧게 돌리면 화면 흔들림)
 SEARCH_LOOP_SLEEP_SEC = 2.0
 
 # ===========================
@@ -64,21 +58,19 @@ wait = WebDriverWait(driver, 20)
 auth_q = queue.Queue()
 
 # 인증발송 성공한 건(대기목록)
-# phone11 -> job(dict)
 auth_sent_jobs = {}
 jobs_lock = threading.Lock()
 
 # 전자서명 진입(중복 방지)
 sign_started = set()
 
-# 전자서명 진행중이면 인증발송은 후순위(큐에 쌓기만)
+# 전자서명 진행중이면 인증발송 후순위
 SIGN_IN_PROGRESS = False
 
 # 중단 플래그
 STOP_FLAG = False
 
 def notify(msg: str):
-    # TODO: 텔레그램/슬랙 붙일 자리
     print("🔔", msg)
 
 def set_stop(reason: str):
@@ -107,21 +99,18 @@ def phone11_to_display(phone11: str) -> str:
     return f"{phone11[0:3]}-{phone11[3:7]}-{phone11[7:11]}"
 
 def compute_check_interval(auth_sent_at: float) -> int:
-    """
-    대기시간이 길어질수록 체크 간격을 늘려서(백오프) 10~20건도 부담 없이 운영.
-    """
     now = time.time()
     elapsed = max(0, now - auth_sent_at)
 
-    if elapsed < 10 * 60:      # 0~10분
-        return 120            # 2분
-    if elapsed < 60 * 60:      # 10~60분
-        return 300            # 5분
-    if elapsed < 6 * 60 * 60:  # 1~6시간
-        return 900            # 15분
-    if elapsed < 24 * 60 * 60: # 6~24시간
-        return 1800           # 30분
-    return 3600               # 1시간
+    if elapsed < 10 * 60:
+        return 120
+    if elapsed < 60 * 60:
+        return 300
+    if elapsed < 6 * 60 * 60:
+        return 900
+    if elapsed < 24 * 60 * 60:
+        return 1800
+    return 3600
 
 # ===========================
 # Selenium: 모달 추출
@@ -270,9 +259,6 @@ def click_text_center(d, txt: str, y_min_ratio: float = 0.0, y_max_ratio: float 
     return False
 
 def restart_digital_sales_app(d) -> bool:
-    """
-    인증발송 시작시: 앱 상태 꼬임 방지용 강제 재시작(권장)
-    """
     try:
         if DIGITAL_SALES_PACKAGE:
             try:
@@ -287,7 +273,6 @@ def restart_digital_sales_app(d) -> bool:
             except Exception:
                 pass
 
-        # fallback: 홈으로 나가서 아이콘 클릭
         try:
             d.press("home")
             time.sleep(0.8)
@@ -304,153 +289,157 @@ def restart_digital_sales_app(d) -> bool:
         return False
 
 def ensure_mobile_order_home(d) -> bool:
-    """
-    디지털세일즈 앱 내부에서 '모바일 주문' 탭 → '일반 주문하기' 화면
-    """
     for _ in range(10):
         if d(text="일반 주문하기").exists:
             return True
-
         if d(text="모바일 주문").exists:
             click_text_center(d, "모바일 주문", 0.70, 0.98)
             time.sleep(1.0)
             if d(text="일반 주문하기").exists:
                 return True
-
         time.sleep(0.4)
-
     return d(text="일반 주문하기").exists
 
 def enter_order_status(d) -> bool:
-    """
-    모바일 주문 홈에서 '일반주문'을 눌러 주문현황 진입
-    """
     if d(text="주문현황").exists:
+        ensure_general_tab(d)
         return True
-
     if not ensure_mobile_order_home(d):
         return False
-
     if d(text="일반주문").exists:
         click_text_center(d, "일반주문", 0.25, 0.80)
         time.sleep(1.0)
-        return d(text="주문현황").exists
-
+        ok = d(text="주문현황").exists
+        if ok:
+            ensure_general_tab(d)
+        return ok
     return d(text="주문현황").exists
 
 def exit_order_status_to_mobile_home(d) -> bool:
-    """
-    주문현황 우측 상단 X → 팝업 '확인' → 모바일 주문 화면으로 복귀
-    """
     if not d(text="주문현황").exists:
         return True
 
-    try:
-        w, h = d.window_size()
-        d.click(int(w * 0.965), int(h * 0.075))  # X
-        time.sleep(0.3)
-    except Exception:
-        pass
+    ok = False
+    for _ in range(2):
+        try:
+            w, h = d.window_size()
+            d.click(int(w * 0.965), int(h * 0.075))
+            time.sleep(0.3)
+        except Exception:
+            pass
 
-    # 종료 팝업 확인
-    for _ in range(15):
-        if d(text="확인").exists and d(text="취소").exists:
-            click_text_center(d, "확인", 0.45, 0.95)
-            time.sleep(0.8)
-            break
-        time.sleep(0.2)
+        for _ in range(15):
+            if d(text="확인").exists and d(text="취소").exists:
+                click_text_center(d, "확인", 0.45, 0.95)
+                time.sleep(0.8)
+                break
+            time.sleep(0.2)
 
-    # 모바일 주문 홈 도달 확인
-    for _ in range(20):
-        if d(text="일반 주문하기").exists or d(text="모바일 주문").exists:
+        for _ in range(20):
+            if d(text="일반 주문하기").exists or d(text="모바일 주문").exists:
+                ok = True
+                break
+            time.sleep(0.2)
+
+        if ok:
             return True
-        time.sleep(0.2)
 
-    return d(text="일반 주문하기").exists or d(text="모바일 주문").exists
+    # X가 안 먹히면 앱 재시작으로 리셋
+    return restart_digital_sales_app(d) and ensure_mobile_order_home(d)
 
 def refresh_order_status_by_reenter(d) -> bool:
-    """
-    ✅ 새로고침 아이콘 대신 '재진입'으로 갱신(안정)
-    """
     if not d(text="주문현황").exists:
-        # 이미 주문현황이 아니면 그냥 진입 시도
         return enter_order_status(d)
-
     ok = exit_order_status_to_mobile_home(d)
     if not ok:
         return False
     return enter_order_status(d)
 
-# ===========================
-# 주문현황: 검색 방식(대기목록 1건씩)
-# ===========================
-def set_search_mode_contact_if_possible(d) -> bool:
+def is_tab_selected(d, tab_text: str) -> bool:
+    try:
+        for o in d(text=tab_text).all():
+            try:
+                info = o.info
+                if info.get("selected") or info.get("checked"):
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        return False
+    return False
+
+def ensure_general_tab(d) -> bool:
     """
-    드롭다운이 '고객/상호' 또는 '고객'이면 눌러서 '연락처'로 변경 시도.
-    실패해도 안전하게 False 반환(이 경우 이름 검색으로 fallback)
+    ✅ 코라솔 절대 클릭 금지:
+    - 코라솔/청약이 selected면 '일반'만 눌러서 복구
     """
     if not d(text="주문현황").exists:
         return False
 
-    # 드롭다운 현재 라벨 후보
-    label_candidates = ["고객/상호", "고객"]
-    opened = False
-    for lb in label_candidates:
-        if d(text=lb).exists:
-            click_text_center(d, lb, 0.15, 0.40)
-            time.sleep(0.4)
-            opened = True
-            break
-
-    if not opened:
-        return False
-
-    if d(text="연락처").exists:
-        click_text_center(d, "연락처", 0.10, 0.60)
-        time.sleep(0.4)
+    if is_tab_selected(d, "일반"):
         return True
 
-    return False
+    # 코라솔이 선택돼 있어도 '일반'만 클릭 (코라솔 텍스트는 절대 클릭 안 함)
+    click_text_center(d, "일반", 0.08, 0.22)
+    time.sleep(0.4)
+    return True
+
+# ===========================
+# 주문현황: 검색 (드롭다운 절대 클릭 금지)
+# ===========================
+def dismiss_search_mode_dropdown_if_open(d):
+    try:
+        if d(text="연락처").exists and d(text="고객/상호").exists:
+            w, h = d.window_size()
+            d.click(int(w * 0.60), int(h * 0.12))
+            time.sleep(0.3)
+    except Exception:
+        pass
 
 def find_search_edittext(d):
     """
-    주문현황 상단 검색창 EditText 찾기(상단 15%~35% 범위)
+    ✅ 가장 넓은 검색어 입력칸만 선택(드롭다운 아님)
     """
     try:
         w, h = d.window_size()
-        edits = d(className="android.widget.EditText").all()
-        for e in edits:
+        best = None
+        best_w = 0
+        for e in d(className="android.widget.EditText").all():
             try:
                 b = e.info.get("bounds", {})
+                left = int(b.get("left", 0))
                 top = int(b.get("top", 0))
+                right = int(b.get("right", 0))
+                bottom = int(b.get("bottom", 0))
+                bw = right - left
                 if top < int(h * 0.12) or top > int(h * 0.35):
                     continue
-                return e
+                if bw < int(w * 0.40):
+                    continue
+                if bw > best_w:
+                    best_w = bw
+                    best = e
             except Exception:
                 continue
+        return best
     except Exception:
         return None
-    return None
 
-def click_search_icon_near_input(d, edit_obj):
+def trigger_search(d, edit_obj):
     """
-    돋보기 아이콘은 텍스트가 없을 수 있어 입력창 오른쪽을 좌표 클릭
+    ✅ 돋보기는 '입력창 내부 오른쪽 끝'을 클릭(드롭다운/탭과 분리)
     """
     try:
-        w, h = d.window_size()
         b = edit_obj.info.get("bounds", {})
-        cy = (int(b.get("top", 0)) + int(b.get("bottom", 0))) // 2
-        d.click(int(w * 0.955), cy)
+        x = int(b.get("right", 0)) - 6
+        y = (int(b.get("top", 0)) + int(b.get("bottom", 0))) // 2
+        d.click(x, y)
         time.sleep(0.6)
         return True
     except Exception:
         return False
 
 def get_first_status_badge_in_results(d):
-    """
-    검색 결과에서 첫 번째 row의 상태 뱃지 텍스트를 추출
-    (인증입력/인증완료/서명입력/주문확정/주문삭제 등)
-    """
     status_texts = ["인증완료", "인증입력", "서명입력", "주문확정", "주문삭제", "주문불가"]
     try:
         w, h = d.window_size()
@@ -460,7 +449,6 @@ def get_first_status_badge_in_results(d):
                 try:
                     b = o.info.get("bounds", {})
                     top = int(b.get("top", 0))
-                    # 결과 리스트 영역만
                     if top < int(h * 0.35):
                         continue
                     found.append((top, st, o))
@@ -504,21 +492,17 @@ def back_to_order_status(d) -> bool:
     return d(text="주문현황").exists
 
 def check_one_job_status_by_search(d, job: dict) -> str:
-    """
-    주문현황에서 1건 검색 → 상태 확인.
-    반환: 상태 텍스트(없으면 "")
-    """
     if not enter_order_status(d):
         return ""
 
-    # 검색 모드: 연락처로 바꾸기 시도(안 되면 이름검색)
-    use_contact = set_search_mode_contact_if_possible(d)
+    ensure_general_tab(d)
+    dismiss_search_mode_dropdown_if_open(d)
 
     edit = find_search_edittext(d)
     if edit is None:
         return ""
 
-    query = job["phone11"] if use_contact else job["name"]
+    query = job["name"]
 
     try:
         edit.click()
@@ -528,30 +512,23 @@ def check_one_job_status_by_search(d, job: dict) -> str:
     except Exception:
         return ""
 
-    # 돋보기 클릭(검색 확정)
-    click_search_icon_near_input(d, edit)
+    trigger_search(d, edit)
 
-    # 상태 뱃지 읽기
     st, badge = get_first_status_badge_in_results(d)
     return st
 
 def try_open_ready_sign_detail(d, job: dict) -> bool:
-    """
-    상태가 인증완료로 보일 때:
-    - 인증완료 배지 클릭 → 상세 진입
-    - 상세에서 이름+전화번호 완전일치면 True
-    """
     if not enter_order_status(d):
         return False
 
-    # 연락처 검색 모드 시도
-    use_contact = set_search_mode_contact_if_possible(d)
+    ensure_general_tab(d)
+    dismiss_search_mode_dropdown_if_open(d)
 
     edit = find_search_edittext(d)
     if edit is None:
         return False
 
-    query = job["phone11"] if use_contact else job["name"]
+    query = job["name"]
 
     try:
         edit.click()
@@ -561,7 +538,7 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
     except Exception:
         return False
 
-    click_search_icon_near_input(d, edit)
+    trigger_search(d, edit)
 
     st, badge = get_first_status_badge_in_results(d)
     if st != "인증완료" or badge is None:
@@ -572,7 +549,6 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
     if match_detail_by_name_phone(d, job["name"], job["phone11"]):
         return True
 
-    # 내 건 아니면 즉시 복귀
     back_to_order_status(d)
     return False
 
@@ -580,9 +556,6 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
 # 인증발송(A)
 # ===========================
 def send_auth_request(d, job: dict):
-    """
-    인증발송은 앱 상태 꼬임 방지 위해 '강제 재시작' 후 진행
-    """
     if not restart_digital_sales_app(d):
         return (False, "APP_RESTART_FAIL")
 
@@ -620,7 +593,6 @@ def send_auth_request(d, job: dict):
         time.sleep(0.2)
 
     if not d(text="발송").exists:
-        # 팝업이 늦는 경우 대기
         for _ in range(40):
             if d(text="발송").exists:
                 break
@@ -646,7 +618,6 @@ def emulator_main_loop():
     print("✅ 에뮬레이터 연결 완료:", ADB_SERIAL)
 
     last_reenter = 0.0
-    rr_index = 0
 
     while True:
         try:
@@ -654,12 +625,11 @@ def emulator_main_loop():
                 time.sleep(1.0)
                 continue
 
-            # 전자서명 진행중이면 인증발송 후순위
             if SIGN_IN_PROGRESS:
                 time.sleep(0.8)
                 continue
 
-            # 1) 인증발송 큐 우선 처리
+            # 1) 인증발송 우선
             try:
                 job = auth_q.get_nowait()
             except queue.Empty:
@@ -672,17 +642,15 @@ def emulator_main_loop():
 
                     ok, reason = send_auth_request(d, job)
                     if ok:
-                        # 대기목록 저장(백오프 메타 포함)
                         now = time.time()
                         job["auth_sent_at"] = now
-                        job["next_check_at"] = now + 60  # 첫 체크는 1분 뒤
+                        job["next_check_at"] = now + 60
                         job["last_check_at"] = 0.0
                         job["last_status"] = ""
                         with jobs_lock:
                             auth_sent_jobs[job["phone11"]] = job
                         print(f"✅ 인증발송 성공: {job['name']} / {job['phone11']}")
                         notify(f"인증발송 성공: {job['name']} / {job['phone11']}")
-
                     else:
                         if reason in ["APP_RESTART_FAIL", "NOT_READY"] and retry < AUTH_RETRY_MAX:
                             retry += 1
@@ -698,7 +666,7 @@ def emulator_main_loop():
                 time.sleep(0.2)
                 continue
 
-            # 2) 대기목록이 없으면 아무것도 안 함(화면 흔들림 방지)
+            # 2) 대기목록이 없으면 아무것도 안 함
             with jobs_lock:
                 pending = [j for (p, j) in auth_sent_jobs.items() if p not in sign_started]
             if not pending:
@@ -707,16 +675,15 @@ def emulator_main_loop():
 
             now = time.time()
 
-            # 3) 주문현황 “재진입 갱신” (주기)
+            # 3) 재진입 갱신(코라솔 방지 위해 진입 후 일반 탭 강제)
             if now - last_reenter >= ORDER_REENTER_INTERVAL_SEC:
-                # 주문현황이든 뭐든 상관없이 재진입으로 갱신
                 refresh_order_status_by_reenter(d)
+                ensure_general_tab(d)
                 last_reenter = now
 
-            # 4) 라운드로빈 + 백오프: 이번 사이클에 2~3건만 검색
+            # 4) 백오프 + 배치 검색
             pending.sort(key=lambda x: x.get("next_check_at", 0.0))
             due = [j for j in pending if j.get("next_check_at", 0.0) <= now]
-
             if not due:
                 time.sleep(SEARCH_LOOP_SLEEP_SEC)
                 continue
@@ -724,7 +691,6 @@ def emulator_main_loop():
             batch = due[:SEARCH_BATCH_PER_CYCLE]
 
             for j in batch:
-                # 다시 인증발송이 들어오면 즉시 빠져나가 후순위 보장
                 if not auth_q.empty():
                     break
 
@@ -732,7 +698,6 @@ def emulator_main_loop():
                 j["last_check_at"] = time.time()
                 j["last_status"] = st
 
-                # 다음 체크 시각 갱신(백오프)
                 interval = compute_check_interval(j["auth_sent_at"])
                 j["next_check_at"] = time.time() + interval
 
@@ -742,17 +707,9 @@ def emulator_main_loop():
                 print(f"🧾 상태체크: {j['name']} / {j['phone11']} => {st or 'NONE'} (다음 {interval}s)")
 
                 if st == "인증완료":
-                    # 상세 진입 + 이름/번호 완전일치 검증
                     ok = try_open_ready_sign_detail(d, j)
                     if ok:
-                        # 여기서부터 전자서명 자동화 이어붙일 자리
                         notify(f"✅ 인증완료 확인(매칭 OK): {j['name']} / {j['phone11']}  → 전자서명 단계로 진행 가능")
-                        # 지금은 안전하게 자동 진행은 하지 않고, 다음 단계 코딩 시 여기에 붙임
-                        # sign_started.add(j['phone11']) 를 하면 중복 체크를 막을 수 있음
-                        # (원하면 지금부터 시작 처리로 바꿔줄게)
-                        # 예: sign_started.add(j['phone11'])
-
-                        # 안전: 상세 화면에 머물지 않게 주문현황로 복귀
                         back_to_order_status(d)
 
                 time.sleep(0.6)
