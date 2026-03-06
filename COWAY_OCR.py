@@ -237,69 +237,135 @@ def enable_fast_ime(d):
 
 def type_into_edittext(d, edit_obj, text: str) -> bool:
     """
-    ✅ 한글 포함 입력 안정화:
-    1) set_text 시도 + 검증
-    2) fast IME send_keys + 검증
-    3) 클립보드 붙여넣기 + 검증
+    ✅ 한글 입력 3단계(검증 포함)
+    1) set_text
+    2) fast IME send_keys
+    3) clipboard + (붙여넣기/붙여 넣기/Paste) 버튼 클릭
+
+    추가:
+    - 검색창은 가운데보다 '왼쪽 안쪽' 클릭이 더 안정적일 수 있음
+    - 포커스를 2회 확보
+    - 매 단계마다 실제 입력값 검증
     """
+    def _refind():
+        try:
+            fresh = find_search_edittext(d)
+            return fresh if fresh is not None else edit_obj
+        except Exception:
+            return edit_obj
+
+    def _get_now(obj):
+        try:
+            return (obj.get_text() or "").strip()
+        except Exception:
+            try:
+                info = obj.info or {}
+                return str(info.get("text") or "").strip()
+            except Exception:
+                return ""
+
     try:
-        b = edit_obj.info.get("bounds", {})
-        cx = (int(b.get("left", 0)) + int(b.get("right", 0))) // 2
-        cy = (int(b.get("top", 0)) + int(b.get("bottom", 0))) // 2
-        d.click(cx, cy)
-        time.sleep(0.1)
+        obj = _refind()
+        b = obj.info.get("bounds", {})
+        left = int(b.get("left", 0))
+        top = int(b.get("top", 0))
+        right = int(b.get("right", 0))
+        bottom = int(b.get("bottom", 0))
+
+        cy = (top + bottom) // 2
+
+        # ✅ 가운데 클릭 대신 왼쪽 안쪽 클릭
+        focus_x = left + max(20, (right - left) // 6)
+
+        # 1차 포커스
+        d.click(focus_x, cy)
+        time.sleep(0.2)
+
+        # 2차 포커스
+        d.click(focus_x, cy)
+        time.sleep(0.2)
+
+        obj = _refind()
+
+        # 혹시 이전 값이 남아 있으면 먼저 비우기 시도
+        try:
+            obj.set_text("")
+            time.sleep(0.15)
+        except Exception:
+            pass
 
         # 1) set_text
         try:
-            edit_obj.set_text(text)
-            time.sleep(0.2)
-            got = ""
-            try:
-                got = (edit_obj.get_text() or "").strip()
-            except Exception:
-                got = ""
-            if got and (text in got or got == text):
+            obj = _refind()
+            obj.set_text(text)
+            time.sleep(0.35)
+            got = _get_now(obj)
+            print(f"🔍 [type_into_edittext] set_text 결과: '{got}'")
+            if got and (got == text or text in got):
                 return True
+        except Exception as e:
+            print("⚠️ [type_into_edittext] set_text 실패:", e)
+
+        # 2) fast IME + send_keys
+        try:
+            d.set_fastinput_ime(True)
         except Exception:
             pass
 
-        # 2) fast IME send_keys
-        enable_fast_ime(d)
         try:
+            obj = _refind()
+            d.click(focus_x, cy)
+            time.sleep(0.15)
             d.send_keys(text, clear=True)
-            time.sleep(0.2)
-            got = ""
-            try:
-                got = (edit_obj.get_text() or "").strip()
-            except Exception:
-                got = ""
-            if got and (text in got or got == text):
+            time.sleep(0.35)
+            got = _get_now(obj)
+            print(f"🔍 [type_into_edittext] send_keys 결과: '{got}'")
+            if got and (got == text or text in got):
                 return True
-        except Exception:
-            pass
+        except Exception as e:
+            print("⚠️ [type_into_edittext] send_keys 실패:", e)
 
         # 3) clipboard paste
         try:
+            obj = _refind()
             d.set_clipboard(text)
-            time.sleep(0.1)
-            # 길게 눌러 붙여넣기 메뉴 호출
-            d.long_click(cx, cy, 0.5)
-            time.sleep(0.3)
-            if d(text="붙여넣기").exists:
-                d(text="붙여넣기").click()
-                time.sleep(0.3)
-            got = ""
-            try:
-                got = (edit_obj.get_text() or "").strip()
-            except Exception:
-                got = ""
-            if got and (text in got or got == text):
-                return True
-        except Exception:
-            pass
+            time.sleep(0.15)
 
+            d.long_click(focus_x, cy, 0.7)
+            time.sleep(0.45)
+
+            paste_candidates = ["붙여넣기", "붙여 넣기", "Paste", "PASTE"]
+            clicked = False
+
+            for t in paste_candidates:
+                if d(text=t).exists:
+                    d(text=t).click()
+                    clicked = True
+                    time.sleep(0.35)
+                    break
+
+            if not clicked:
+                if d(textContains="붙여").exists:
+                    d(textContains="붙여").click()
+                    clicked = True
+                    time.sleep(0.35)
+                elif d(textContains="Paste").exists:
+                    d(textContains="Paste").click()
+                    clicked = True
+                    time.sleep(0.35)
+
+            got = _get_now(obj)
+            print(f"🔍 [type_into_edittext] clipboard 결과: '{got}' / clicked={clicked}")
+            if got and (got == text or text in got):
+                return True
+        except Exception as e:
+            print("⚠️ [type_into_edittext] clipboard 실패:", e)
+
+        print("❌ [type_into_edittext] 최종 입력 실패")
         return False
-    except Exception:
+
+    except Exception as e:
+        print("❌ [type_into_edittext] 예외:", e)
         return False
 
 def restart_digital_sales_app(d) -> bool:
@@ -345,81 +411,252 @@ def ensure_mobile_order_home(d) -> bool:
     return d(text="일반 주문하기").exists
 
 def is_tab_selected(d, tab_text: str) -> bool:
+    """
+    이 앱은 selected/checked 값이 잘 안 잡히는 경우가 많아서
+    현재는 신뢰하지 않는다.
+    """
+    return False
+
+def ensure_general_tab(d, force_click: bool = False) -> bool:
+    """
+    ✅ 주문현황에서 '일반' 탭 복구 + 실제 복구 여부 검증
+    검증 기준:
+    - 일반 탭이면 좌측 검색 드롭다운이 '고객/상호'
+    - 코라솔 쪽이면 '고객'으로 보이는 경우가 있음
+    """
+    if not d(text="주문현황").exists:
+        return False
+
+    def _is_general_ready():
+        try:
+            return d(text="고객/상호").exists
+        except Exception:
+            return False
+
+    def _debug_mode_label():
+        try:
+            has_customer_company = d(text="고객/상호").exists
+        except Exception:
+            has_customer_company = False
+
+        try:
+            has_customer_only = d(text="고객").exists
+        except Exception:
+            has_customer_only = False
+
+        return f"고객/상호={has_customer_company}, 고객={has_customer_only}"
+
+    if _is_general_ready():
+        print("✅ [ensure_general_tab] 이미 일반 탭 상태")
+        return True
+
+    if not force_click:
+        print(f"⚠️ [ensure_general_tab] 일반 탭 아님 / { _debug_mode_label() }")
+        return False
+
     try:
-        for o in d(text=tab_text).all():
+        w, h = d.window_size()
+
+        # 1차: 상단의 '일반' 텍스트 객체 자체를 직접 클릭 시도
+        objs = d(text="일반")
+        try:
+            cnt = objs.count
+        except Exception:
+            cnt = 0
+
+        for i in range(cnt):
             try:
-                info = o.info
-                if info.get("selected") or info.get("checked"):
+                o = objs[i]
+                b = o.info.get("bounds", {})
+                left = int(b.get("left", 0))
+                top = int(b.get("top", 0))
+                right = int(b.get("right", 0))
+                bottom = int(b.get("bottom", 0))
+
+                # 상단 탭 영역에 있는 '일반'만 사용
+                if top < int(h * 0.05) or top > int(h * 0.22):
+                    continue
+
+                cx = (left + right) // 2
+                cy = (top + bottom) // 2
+
+                d.click(cx, cy)
+                time.sleep(0.45)
+
+                if _is_general_ready():
+                    print(f"✅ [ensure_general_tab] 일반 탭 텍스트 클릭 성공 ({cx}, {cy})")
                     return True
             except Exception:
                 continue
-    except Exception:
-        return False
-    return False
 
-def ensure_general_tab(d) -> bool:
-    if not d(text="주문현황").exists:
+        # 2차: 텍스트 클릭이 안 먹으면 좌표 fallback
+        candidate_points = [
+            (int(w * 0.18), int(h * 0.105)),
+            (int(w * 0.20), int(h * 0.105)),
+            (int(w * 0.16), int(h * 0.105)),
+            (int(w * 0.18), int(h * 0.115)),
+            (int(w * 0.20), int(h * 0.115)),
+            (int(w * 0.16), int(h * 0.115)),
+        ]
+
+        for x, y in candidate_points:
+            try:
+                d.click(x, y)
+                time.sleep(0.45)
+
+                if _is_general_ready():
+                    print(f"✅ [ensure_general_tab] 일반 탭 좌표 클릭 성공 ({x}, {y})")
+                    return True
+            except Exception:
+                continue
+
+        print(f"❌ [ensure_general_tab] 일반 탭 복구 실패 / { _debug_mode_label() }")
         return False
-    if is_tab_selected(d, "일반"):
-        return True
-    click_text_center(d, "일반", 0.08, 0.22)
-    time.sleep(0.4)
-    return True
+
+    except Exception as e:
+        print("❌ [ensure_general_tab] 예외:", e)
+        return False
 
 def enter_order_status(d) -> bool:
     if d(text="주문현황").exists:
-        ensure_general_tab(d)
         return True
+
     if not ensure_mobile_order_home(d):
         return False
+
     if d(text="일반주문").exists:
         click_text_center(d, "일반주문", 0.25, 0.80)
         time.sleep(1.0)
+
         ok = d(text="주문현황").exists
         if ok:
-            ensure_general_tab(d)
+            ensure_general_tab(d, force_click=True)
+            time.sleep(0.4)
         return ok
+
     return d(text="주문현황").exists
 
 def exit_order_status_to_mobile_home(d) -> bool:
+    """
+    ✅ 주문현황에서 '진짜' 모바일 주문 홈으로 빠져나오는지 확인
+    성공 조건:
+    - 주문현황 텍스트가 사라져야 함
+    - 일반 주문하기가 보여야 함
+    """
     if not d(text="주문현황").exists:
-        return True
+        return d(text="일반 주문하기").exists
 
-    ok = False
-    for _ in range(2):
+    for attempt in range(2):
+        print(f"🔄 [exit_order_status_to_mobile_home] 주문현황 종료 시도 {attempt + 1}/2")
+
         try:
             w, h = d.window_size()
             d.click(int(w * 0.965), int(h * 0.075))
-            time.sleep(0.3)
-        except Exception:
-            pass
+            time.sleep(0.35)
+        except Exception as e:
+            print("⚠️ [exit_order_status_to_mobile_home] X 클릭 실패:", e)
 
+        confirmed = False
         for _ in range(15):
-            if d(text="확인").exists and d(text="취소").exists:
-                click_text_center(d, "확인", 0.45, 0.95)
-                time.sleep(0.8)
-                break
+            try:
+                if d(text="확인").exists and d(text="취소").exists:
+                    click_text_center(d, "확인", 0.45, 0.95)
+                    time.sleep(0.9)
+                    confirmed = True
+                    break
+            except Exception:
+                pass
             time.sleep(0.2)
+
+        if confirmed:
+            print("✅ [exit_order_status_to_mobile_home] 확인 팝업 처리 완료")
+        else:
+            print("ℹ️ [exit_order_status_to_mobile_home] 확인 팝업 없음 또는 미검출")
 
         for _ in range(20):
-            if d(text="일반 주문하기").exists or d(text="모바일 주문").exists:
-                ok = True
-                break
-            time.sleep(0.2)
+            try:
+                in_order_status = d(text="주문현황").exists
+            except Exception:
+                in_order_status = False
 
-        if ok:
-            return True
+            try:
+                on_mobile_home = d(text="일반 주문하기").exists
+            except Exception:
+                on_mobile_home = False
 
-    return restart_digital_sales_app(d) and ensure_mobile_order_home(d)
+            if (not in_order_status) and on_mobile_home:
+                print("✅ [exit_order_status_to_mobile_home] 모바일 주문 홈 복귀 성공")
+                return True
+
+            time.sleep(0.25)
+
+        print("⚠️ [exit_order_status_to_mobile_home] 아직 주문현황에서 완전히 빠지지 못함")
+
+    print("❌ [exit_order_status_to_mobile_home] 모바일 주문 홈 복귀 실패")
+    return False
 
 def refresh_order_status_by_reenter(d) -> bool:
-    if not d(text="주문현황").exists:
-        return enter_order_status(d)
-    ok = exit_order_status_to_mobile_home(d)
-    if not ok:
-        return False
-    return enter_order_status(d)
+    """
+    ✅ 앱 종료 없이 주문현황 리스트를 강하게 갱신
+    흐름:
+    주문현황 X -> 확인 -> 모바일 주문 홈 -> 일반주문 재진입
 
+    중요:
+    - 실제로 '일반 주문하기' 화면까지 나갔는지 검증
+    - 다시 주문현황으로 들어왔는지 검증
+    """
+    try:
+        print("🔄 [refresh_order_status_by_reenter] 주문현황 재진입 갱신 시작")
+
+        if not d(text="주문현황").exists:
+            print("ℹ️ [refresh_order_status_by_reenter] 현재 주문현황 밖 → 바로 진입 시도")
+            ok = enter_order_status(d)
+            if not ok:
+                print("❌ [refresh_order_status_by_reenter] 주문현황 진입 실패")
+                return False
+
+            if not d(text="주문현황").exists:
+                print("❌ [refresh_order_status_by_reenter] enter_order_status 이후에도 주문현황 미확인")
+                return False
+
+            ensure_general_tab(d, force_click=True)
+            print("✅ [refresh_order_status_by_reenter] 주문현황 진입으로 갱신 완료")
+            return True
+
+        ok = exit_order_status_to_mobile_home(d)
+        if not ok:
+            print("❌ [refresh_order_status_by_reenter] 주문현황 종료 실패")
+            return False
+
+        if d(text="주문현황").exists:
+            print("❌ [refresh_order_status_by_reenter] 종료 후에도 아직 주문현황 화면임")
+            return False
+
+        if not d(text="일반 주문하기").exists:
+            print("❌ [refresh_order_status_by_reenter] 종료 후 일반 주문하기 화면 미확인")
+            return False
+
+        print("✅ [refresh_order_status_by_reenter] 모바일 주문 홈 확인 완료")
+
+        ok = enter_order_status(d)
+        if not ok:
+            print("❌ [refresh_order_status_by_reenter] 재진입 실패")
+            return False
+
+        if not d(text="주문현황").exists:
+            print("❌ [refresh_order_status_by_reenter] 재진입 후에도 주문현황 미확인")
+            return False
+
+        if not ensure_general_tab(d, force_click=True):
+            print("❌ [refresh_order_status_by_reenter] 재진입 후 일반 탭 복구 실패")
+            return False
+
+        print("✅ [refresh_order_status_by_reenter] 주문현황 재진입 갱신 완료")
+        return True
+
+    except Exception as e:
+        print("❌ [refresh_order_status_by_reenter] 예외:", e)
+        return False
 # ---------------------------
 # Search (드롭다운 클릭 금지)
 # ---------------------------
@@ -435,49 +672,81 @@ def dismiss_search_mode_dropdown_if_open(d):
 def find_search_edittext(d):
     """
     ✅ 가장 넓은 검색어 입력(EditText) 선택
+    - 현재 uiautomator2 환경에서는 .all() 대신 count + index 방식 사용
+    - 상단 검색영역 후보 중 가장 넓은 입력칸을 사용
     """
     try:
         w, h = d.window_size()
         best = None
         best_w = 0
-        for e in d(className="android.widget.EditText").all():
+
+        edits = d(className="android.widget.EditText")
+        cnt = edits.count
+        print(f"🔍 [find_search_edittext] EditText 개수: {cnt}")
+
+        for i in range(cnt):
             try:
+                e = edits[i]
                 b = e.info.get("bounds", {})
                 left = int(b.get("left", 0))
                 top = int(b.get("top", 0))
                 right = int(b.get("right", 0))
                 bottom = int(b.get("bottom", 0))
                 bw = right - left
-                if top < int(h * 0.12) or top > int(h * 0.35):
+
+                print(f"   - EditText[{i}] bounds=({left},{top},{right},{bottom}) width={bw}")
+
+                if top < int(h * 0.10) or top > int(h * 0.42):
                     continue
-                # 충분히 넓은 입력칸만
-                if bw < int(w * 0.40):
+
+                if bw < int(w * 0.30):
                     continue
+
                 if bw > best_w:
                     best_w = bw
                     best = e
-            except Exception:
+            except Exception as e:
+                print(f"⚠️ [find_search_edittext] EditText[{i}] 확인 실패: {e}")
                 continue
+
+        if best is None:
+            print("❌ [find_search_edittext] 상단 검색영역 후보를 찾지 못함")
+        else:
+            try:
+                b = best.info.get("bounds", {})
+                print(f"✅ [find_search_edittext] 선택된 bounds={b}")
+            except Exception:
+                pass
+
         return best
-    except Exception:
+    except Exception as e:
+        print("❌ [find_search_edittext] 예외:", e)
         return None
 
 def trigger_search(d, edit_obj):
     """
-    입력칸 오른쪽 끝을 클릭 + Enter
+    ✅ 검색 실행을 확실히:
+    - 입력칸 '바깥쪽 오른쪽' (돋보기 아이콘 위치)을 클릭
+    - 그 다음 Enter도 1번 누름
     """
     try:
+        w, h = d.window_size()
         b = edit_obj.info.get("bounds", {})
-        x = int(b.get("right", 0)) - 6
-        y = (int(b.get("top", 0)) + int(b.get("bottom", 0))) // 2
-        d.click(x, y)
-        time.sleep(0.3)
+        right = int(b.get("right", 0))
+        top = int(b.get("top", 0))
+        bottom = int(b.get("bottom", 0))
+        cy = (top + bottom) // 2
+
+        # ✅ 입력칸 내부가 아니라 '오른쪽 바깥'을 찍는다
+        x = min(w - 5, right + 25)
+        d.click(x, cy)
+        time.sleep(0.35)
     except Exception:
         pass
 
     try:
         d.press("enter")
-        time.sleep(0.4)
+        time.sleep(0.35)
     except Exception:
         pass
 
@@ -537,53 +806,74 @@ def back_to_order_status(d) -> bool:
 
 def check_one_job_status_by_search(d, job: dict) -> str:
     if not enter_order_status(d):
+        print("❌ [status_check] 주문현황 진입 실패")
         return ""
 
-    ensure_general_tab(d)
+    # ✅ 검색 직전마다 무조건 일반 탭으로 복구
+    if not ensure_general_tab(d, force_click=True):
+        print("❌ [status_check] 일반 탭 복구 실패")
+        return ""
+
     dismiss_search_mode_dropdown_if_open(d)
 
     edit = find_search_edittext(d)
     if edit is None:
+        print("❌ [status_check] 검색어 입력 EditText를 찾지 못함")
         return ""
 
     query = job["name"]
+    print(f"🔎 [status_check] 검색 시작: {query}")
 
     ok = type_into_edittext(d, edit, query)
     if not ok:
+        print(f"❌ [status_check] 검색어 입력 실패: {query}")
         return ""
 
     trigger_search(d, edit)
     st, badge = get_first_status_badge_in_results(d)
+    print(f"🧾 [status_check] 검색 결과 상태: {st or 'NONE'}")
     return st
 
 def try_open_ready_sign_detail(d, job: dict) -> bool:
     if not enter_order_status(d):
+        print("❌ [ready_sign] 주문현황 진입 실패")
         return False
 
-    ensure_general_tab(d)
+    # ✅ 상세 진입 검색 전에도 무조건 일반 탭으로 복구
+    if not ensure_general_tab(d, force_click=True):
+        print("❌ [ready_sign] 일반 탭 복구 실패")
+        return False
+
     dismiss_search_mode_dropdown_if_open(d)
 
     edit = find_search_edittext(d)
     if edit is None:
+        print("❌ [ready_sign] 검색어 입력 EditText를 찾지 못함")
         return False
 
     query = job["name"]
+    print(f"🔎 [ready_sign] 인증완료 상세진입 검색: {query}")
 
     ok = type_into_edittext(d, edit, query)
     if not ok:
+        print(f"❌ [ready_sign] 검색어 입력 실패: {query}")
         return False
 
     trigger_search(d, edit)
 
     st, badge = get_first_status_badge_in_results(d)
+    print(f"🧾 [ready_sign] 검색 결과 상태: {st or 'NONE'}")
+
     if st != "인증완료" or badge is None:
         return False
 
     open_detail_by_status_badge(d, badge)
 
     if match_detail_by_name_phone(d, job["name"], job["phone11"]):
+        print("✅ [ready_sign] 상세 고객명/전화번호 매칭 성공")
         return True
 
+    print("❌ [ready_sign] 상세 고객명/전화번호 매칭 실패 → 주문현황으로 복귀")
     back_to_order_status(d)
     return False
 
@@ -710,13 +1000,7 @@ def emulator_main_loop():
 
             now = time.time()
 
-            # 3) 재진입 갱신(가끔 코라솔로 가도 일반 탭 복구)
-            if now - last_reenter >= ORDER_REENTER_INTERVAL_SEC:
-                refresh_order_status_by_reenter(d)
-                ensure_general_tab(d)
-                last_reenter = now
-
-            # 4) 백오프 + 배치 검색
+            # 3) 백오프 + 배치 검색 대상 선정
             pending.sort(key=lambda x: x.get("next_check_at", 0.0))
             due = [j for j in pending if j.get("next_check_at", 0.0) <= now]
             if not due:
@@ -724,6 +1008,18 @@ def emulator_main_loop():
                 continue
 
             batch = due[:SEARCH_BATCH_PER_CYCLE]
+
+            # 4) ✅ 실제 체크할 대상이 있을 때만
+            #    앱 종료 없이 "주문현황 X -> 확인 -> 홈 -> 일반주문 재진입" 으로 갱신
+            need_refresh = (now - last_reenter >= ORDER_REENTER_INTERVAL_SEC) or True
+            if need_refresh:
+                ok_refresh = refresh_order_status_by_reenter(d)
+                if not ok_refresh:
+                    print("❌ [emulator_main_loop] 재진입 갱신 실패 → 이번 배치 건너뜀")
+                    time.sleep(SEARCH_LOOP_SLEEP_SEC)
+                    continue
+                last_reenter = time.time()
+                time.sleep(0.5)
 
             for j in batch:
                 if not auth_q.empty():
