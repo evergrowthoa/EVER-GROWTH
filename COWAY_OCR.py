@@ -971,10 +971,45 @@ def back_to_order_status(d) -> bool:
         time.sleep(0.4)
     return d(text="주문현황").exists
 
+def wait_until_order_status_ready(d, timeout_sec: float = 3.5) -> bool:
+    """
+    ✅ 주문현황 진입 직후 로딩이 끝날 때까지 잠깐 대기
+    준비 완료 기준:
+    - 주문현황 타이틀 존재
+    - 검색용 EditText가 2개 이상 잡힘
+    - 넓은 검색창(EditText)이 실제로 선택 가능
+    """
+    end_at = time.time() + timeout_sec
+
+    while time.time() < end_at:
+        try:
+            if not d(text="주문현황").exists:
+                time.sleep(0.15)
+                continue
+
+            edits = d(className="android.widget.EditText")
+            cnt = edits.count
+
+            if cnt >= 2:
+                edit = find_search_edittext(d)
+                if edit is not None:
+                    print("✅ [wait_until_order_status_ready] 주문현황 로딩 완료")
+                    return True
+        except Exception:
+            pass
+
+        time.sleep(0.15)
+
+    print("⚠️ [wait_until_order_status_ready] 주문현황 로딩 대기 timeout")
+    return False
+
 def check_one_job_status_by_search(d, job: dict) -> str:
     """
     ✅ 리스트 검색 중 홈화면 이탈이 생기면
     모바일 주문 홈 → 주문현황 재진입 → 같은 고객 검색 재시도
+
+    추가:
+    - 주문현황 진입 직후 로딩이 끝날 때까지 잠깐 대기
     """
     for attempt in range(2):
         if is_unexpected_digital_sales_home(d):
@@ -988,6 +1023,10 @@ def check_one_job_status_by_search(d, job: dict) -> str:
         if is_unexpected_digital_sales_home(d):
             if attempt == 0 and recover_from_unexpected_home(d, f"주문현황 진입 직후 {job['name']}"):
                 continue
+            return ""
+
+        if not wait_until_order_status_ready(d, timeout_sec=3.5):
+            print("❌ [status_check] 주문현황 로딩 완료 대기 실패")
             return ""
 
         if not ensure_general_tab(d, force_click=True):
@@ -1023,6 +1062,7 @@ def check_one_job_status_by_search(d, job: dict) -> str:
             return ""
 
         trigger_search(d, edit)
+        time.sleep(0.6)
 
         if is_unexpected_digital_sales_home(d):
             if attempt == 0 and recover_from_unexpected_home(d, f"검색 실행 중 {job['name']}"):
@@ -1259,13 +1299,13 @@ def emulator_main_loop():
                     if ok:
                         now = time.time()
                         job["auth_sent_at"] = now
-                        job["next_check_at"] = now + 10
+                        job["next_check_at"] = now + 60
                         job["last_check_at"] = 0.0
                         job["last_status"] = ""
                         with jobs_lock:
                             auth_sent_jobs[job["phone11"]] = job
-                        print(f"✅ 인증발송 성공: {job['name']} / {job['phone11']}")
-                        notify(f"인증발송 성공: {job['name']} / {job['phone11']}")
+                        print(f"✅ 인증발송 성공: {job['name']} / {job['phone11']} (최초 상태체크 60초 후)")
+                        notify(f"인증발송 성공: {job['name']} / {job['phone11']} (최초 상태체크 60초 후)")
                     else:
                         if reason in ["APP_RESTART_FAIL", "NOT_READY", "UNEXPECTED_HOME"] and retry < AUTH_RETRY_MAX:
                             retry += 1
