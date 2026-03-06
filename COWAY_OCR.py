@@ -410,6 +410,70 @@ def ensure_mobile_order_home(d) -> bool:
         time.sleep(0.4)
     return d(text="일반 주문하기").exists
 
+def is_unexpected_digital_sales_home(d) -> bool:
+    """
+    ✅ 작업 중 갑자기 디지털세일즈 홈으로 튄 상태 감지
+    예:
+    - 상단 타이틀이 '디지털세일즈'
+    - 주문현황/주문접수 화면이 아님
+    - 모바일 주문 홈('일반 주문하기')도 아님
+    """
+    try:
+        if d(text="주문현황").exists:
+            return False
+    except Exception:
+        pass
+
+    try:
+        if d(text="주문접수").exists or d(text="본인인증 요청").exists:
+            return False
+    except Exception:
+        pass
+
+    try:
+        if d(text="일반 주문하기").exists:
+            return False
+    except Exception:
+        pass
+
+    try:
+        if d(text="디지털세일즈").exists:
+            return True
+    except Exception:
+        pass
+
+    return False
+
+def recover_from_unexpected_home(d, context: str, pause_sec: float = 1.5) -> bool:
+    """
+    ✅ 작업 중 홈 화면 이탈 감지 시
+    - 알림
+    - 잠시 대기
+    - 모바일 주문 홈으로 복귀
+    """
+    if not is_unexpected_digital_sales_home(d):
+        return True
+
+    msg = f"예상 밖 홈화면 이동 감지: {context} → 잠시 대기 후 재진행"
+    print("⚠️", msg)
+    notify(msg)
+
+    time.sleep(pause_sec)
+
+    try:
+        if d(text="모바일 주문").exists:
+            click_text_center(d, "모바일 주문", 0.70, 0.98)
+            time.sleep(1.0)
+    except Exception:
+        pass
+
+    ok = ensure_mobile_order_home(d)
+    if ok:
+        print(f"✅ [recover_from_unexpected_home] 모바일 주문 홈 복구 성공 ({context})")
+    else:
+        print(f"❌ [recover_from_unexpected_home] 모바일 주문 홈 복구 실패 ({context})")
+    return ok
+
 def is_tab_selected(d, tab_text: str) -> bool:
     """
     이 앱은 selected/checked 값이 잘 안 잡히는 경우가 많아서
@@ -419,10 +483,10 @@ def is_tab_selected(d, tab_text: str) -> bool:
 
 def ensure_general_tab(d, force_click: bool = False) -> bool:
     """
-    ✅ 주문현황에서 '일반' 탭 복구 + 실제 복구 여부 검증
-    검증 기준:
-    - 일반 탭이면 좌측 검색 드롭다운이 '고객/상호'
-    - 코라솔 쪽이면 '고객'으로 보이는 경우가 있음
+    ✅ 주문현황에서는 '일반' 탭만 사용
+    - 좌표 fallback 금지
+    - 상단 탭 영역의 '일반' 텍스트 객체만 직접 클릭
+    - 검증은 '고객/상호' 존재로 판단
     """
     if not d(text="주문현황").exists:
         return False
@@ -451,18 +515,21 @@ def ensure_general_tab(d, force_click: bool = False) -> bool:
         return True
 
     if not force_click:
-        print(f"⚠️ [ensure_general_tab] 일반 탭 아님 / { _debug_mode_label() }")
+        print(f"⚠️ [ensure_general_tab] 일반 탭 아님 / {_debug_mode_label()}")
         return False
 
     try:
-        w, h = d.window_size()
+        h = d.window_size()[1]
 
-        # 1차: 상단의 '일반' 텍스트 객체 자체를 직접 클릭 시도
         objs = d(text="일반")
         try:
             cnt = objs.count
         except Exception:
             cnt = 0
+
+        if cnt <= 0:
+            print(f"❌ [ensure_general_tab] 상단 '일반' 텍스트 객체를 찾지 못함 / {_debug_mode_label()}")
+            return False
 
         for i in range(cnt):
             try:
@@ -473,8 +540,8 @@ def ensure_general_tab(d, force_click: bool = False) -> bool:
                 right = int(b.get("right", 0))
                 bottom = int(b.get("bottom", 0))
 
-                # 상단 탭 영역에 있는 '일반'만 사용
-                if top < int(h * 0.05) or top > int(h * 0.22):
+                # 상단 탭 줄에 있는 '일반'만 허용
+                if top < int(h * 0.04) or top > int(h * 0.22):
                     continue
 
                 cx = (left + right) // 2
@@ -486,31 +553,11 @@ def ensure_general_tab(d, force_click: bool = False) -> bool:
                 if _is_general_ready():
                     print(f"✅ [ensure_general_tab] 일반 탭 텍스트 클릭 성공 ({cx}, {cy})")
                     return True
-            except Exception:
+            except Exception as e:
+                print(f"⚠️ [ensure_general_tab] 일반 탭 객체 클릭 실패[{i}]: {e}")
                 continue
 
-        # 2차: 텍스트 클릭이 안 먹으면 좌표 fallback
-        candidate_points = [
-            (int(w * 0.18), int(h * 0.105)),
-            (int(w * 0.20), int(h * 0.105)),
-            (int(w * 0.16), int(h * 0.105)),
-            (int(w * 0.18), int(h * 0.115)),
-            (int(w * 0.20), int(h * 0.115)),
-            (int(w * 0.16), int(h * 0.115)),
-        ]
-
-        for x, y in candidate_points:
-            try:
-                d.click(x, y)
-                time.sleep(0.45)
-
-                if _is_general_ready():
-                    print(f"✅ [ensure_general_tab] 일반 탭 좌표 클릭 성공 ({x}, {y})")
-                    return True
-            except Exception:
-                continue
-
-        print(f"❌ [ensure_general_tab] 일반 탭 복구 실패 / { _debug_mode_label() }")
+        print(f"❌ [ensure_general_tab] 일반 탭 복구 실패 / {_debug_mode_label()}")
         return False
 
     except Exception as e:
@@ -518,79 +565,199 @@ def ensure_general_tab(d, force_click: bool = False) -> bool:
         return False
 
 def enter_order_status(d) -> bool:
+    """
+    ✅ 모바일 주문 홈에서 '주문 이어하기 > 일반주문' 리스트로 진입
+    핵심:
+    - x는 '일반주문' 텍스트 bounds 기준이 아니라 화면 비율 기준으로 고정
+    - y만 일반주문 줄 중심값 사용
+    - 사용자가 표시한 빨간 박스(건수 + 파란 화살표) 영역을 직접 누름
+    """
     if d(text="주문현황").exists:
         return True
 
     if not ensure_mobile_order_home(d):
+        print("❌ [enter_order_status] 모바일 주문 홈 진입 실패")
         return False
 
-    if d(text="일반주문").exists:
-        click_text_center(d, "일반주문", 0.25, 0.80)
-        time.sleep(1.0)
+    try:
+        objs = d(text="일반주문")
+        try:
+            cnt = objs.count
+        except Exception:
+            cnt = 0
 
-        ok = d(text="주문현황").exists
-        if ok:
+        print(f"🔍 [enter_order_status] 일반주문 텍스트 개수: {cnt}")
+
+        target = None
+        best_top = 10**9
+
+        for i in range(cnt):
+            try:
+                o = objs[i]
+                b = o.info.get("bounds", {})
+                left = int(b.get("left", 0))
+                top = int(b.get("top", 0))
+                right = int(b.get("right", 0))
+                bottom = int(b.get("bottom", 0))
+
+                print(f"   - 일반주문[{i}] bounds=({left},{top},{right},{bottom})")
+
+                if top < 300 or top > 1400:
+                    continue
+
+                if top < best_top:
+                    best_top = top
+                    target = (left, top, right, bottom)
+            except Exception as e:
+                print(f"⚠️ [enter_order_status] 일반주문 후보 확인 실패[{i}]: {e}")
+                continue
+
+        if target is None:
+            print("❌ [enter_order_status] 주문 이어하기의 일반주문 행을 찾지 못함")
+            return False
+
+        left, top, right, bottom = target
+        cy = (top + bottom) // 2
+        w, h = d.window_size()
+
+        # ✅ 빨간 박스 영역: 화면 오른쪽 84%~88% 부근
+        candidate_points = [
+            (int(w * 0.84), cy),
+            (int(w * 0.86), cy),
+            (int(w * 0.88), cy),
+            (int(w * 0.84), cy - 8),
+            (int(w * 0.86), cy - 8),
+            (int(w * 0.88), cy - 8),
+            (int(w * 0.84), cy + 8),
+            (int(w * 0.86), cy + 8),
+            (int(w * 0.88), cy + 8),
+        ]
+
+        tried = set()
+        filtered_points = []
+        for x, y in candidate_points:
+            x = max(0, min(w - 10, int(x)))
+            y = max(0, min(h - 10, int(y)))
+            key = (x, y)
+            if key not in tried:
+                filtered_points.append((x, y))
+                tried.add(key)
+
+        for idx, (x, y) in enumerate(filtered_points, start=1):
+            print(f"🎯 [enter_order_status] 건수/화살표 박스 클릭 시도 {idx}/{len(filtered_points)} ({x}, {y})")
+            d.click(x, y)
+            time.sleep(1.2)
+
+            if d(text="주문현황").exists:
+                ensure_general_tab(d, force_click=True)
+                time.sleep(0.4)
+                print("✅ [enter_order_status] 건수/화살표 박스 클릭으로 주문현황 진입 성공")
+                return True
+
+        # fallback 1: 빨간 박스보다 약간 왼쪽
+        fallback_x1 = int(w * 0.82)
+        print(f"🔁 [enter_order_status] 건수영역 왼쪽 fallback 클릭 ({fallback_x1}, {cy})")
+        d.click(fallback_x1, cy)
+        time.sleep(1.2)
+
+        if d(text="주문현황").exists:
             ensure_general_tab(d, force_click=True)
             time.sleep(0.4)
-        return ok
+            print("✅ [enter_order_status] 건수영역 왼쪽 fallback으로 주문현황 진입 성공")
+            return True
 
-    return d(text="주문현황").exists
+        # fallback 2: 빨간 박스보다 약간 오른쪽
+        fallback_x2 = int(w * 0.90)
+        print(f"🔁 [enter_order_status] 건수영역 오른쪽 fallback 클릭 ({fallback_x2}, {cy})")
+        d.click(fallback_x2, cy)
+        time.sleep(1.2)
+
+        if d(text="주문현황").exists:
+            ensure_general_tab(d, force_click=True)
+            time.sleep(0.4)
+            print("✅ [enter_order_status] 건수영역 오른쪽 fallback으로 주문현황 진입 성공")
+            return True
+
+        print("❌ [enter_order_status] 주문현황 진입 실패")
+        return False
+
+    except Exception as e:
+        print("❌ [enter_order_status] 예외:", e)
+        return False
 
 def exit_order_status_to_mobile_home(d) -> bool:
     """
-    ✅ 주문현황에서 '진짜' 모바일 주문 홈으로 빠져나오는지 확인
+    ✅ 주문현황 종료는 X 좌표보다 back 우선
     성공 조건:
-    - 주문현황 텍스트가 사라져야 함
-    - 일반 주문하기가 보여야 함
+    - 주문현황 텍스트가 사라짐
+    - 일반 주문하기가 보임
     """
-    if not d(text="주문현황").exists:
-        return d(text="일반 주문하기").exists
-
-    for attempt in range(2):
-        print(f"🔄 [exit_order_status_to_mobile_home] 주문현황 종료 시도 {attempt + 1}/2")
-
+    def _is_mobile_home():
         try:
-            w, h = d.window_size()
-            d.click(int(w * 0.965), int(h * 0.075))
-            time.sleep(0.35)
-        except Exception as e:
-            print("⚠️ [exit_order_status_to_mobile_home] X 클릭 실패:", e)
+            return (not d(text="주문현황").exists) and d(text="일반 주문하기").exists
+        except Exception:
+            return False
 
-        confirmed = False
-        for _ in range(15):
+    def _click_confirm_like():
+        candidates = ["확인", "예", "닫기", "나가기", "OK", "확 인"]
+        for t in candidates:
             try:
-                if d(text="확인").exists and d(text="취소").exists:
-                    click_text_center(d, "확인", 0.45, 0.95)
-                    time.sleep(0.9)
-                    confirmed = True
-                    break
+                if d(text=t).exists:
+                    d(text=t).click()
+                    time.sleep(0.8)
+                    return True
             except Exception:
                 pass
+
+        for t in candidates:
+            try:
+                if d(textContains=t).exists:
+                    d(textContains=t).click()
+                    time.sleep(0.8)
+                    return True
+            except Exception:
+                pass
+
+        return False
+
+    if _is_mobile_home():
+        print("✅ [exit_order_status_to_mobile_home] 이미 모바일 주문 홈 상태")
+        return True
+
+    if not d(text="주문현황").exists:
+        print("⚠️ [exit_order_status_to_mobile_home] 주문현황 화면이 아님")
+        return _is_mobile_home()
+
+    for attempt in range(3):
+        print(f"🔄 [exit_order_status_to_mobile_home] 주문현황 종료 시도 {attempt + 1}/3")
+
+        # 1) back 우선
+        try:
+            d.press("back")
+            time.sleep(0.45)
+        except Exception as e:
+            print("⚠️ [exit_order_status_to_mobile_home] back 실패:", e)
+
+        # 2) 확인류 팝업 처리
+        clicked_confirm = False
+        for _ in range(10):
+            if _click_confirm_like():
+                clicked_confirm = True
+                print("✅ [exit_order_status_to_mobile_home] 확인류 팝업 처리 완료")
+                break
             time.sleep(0.2)
 
-        if confirmed:
-            print("✅ [exit_order_status_to_mobile_home] 확인 팝업 처리 완료")
-        else:
-            print("ℹ️ [exit_order_status_to_mobile_home] 확인 팝업 없음 또는 미검출")
+        if not clicked_confirm:
+            print("ℹ️ [exit_order_status_to_mobile_home] 확인류 팝업 없음 또는 미검출")
 
+        # 3) 홈 복귀 판정
         for _ in range(20):
-            try:
-                in_order_status = d(text="주문현황").exists
-            except Exception:
-                in_order_status = False
-
-            try:
-                on_mobile_home = d(text="일반 주문하기").exists
-            except Exception:
-                on_mobile_home = False
-
-            if (not in_order_status) and on_mobile_home:
+            if _is_mobile_home():
                 print("✅ [exit_order_status_to_mobile_home] 모바일 주문 홈 복귀 성공")
                 return True
-
             time.sleep(0.25)
 
-        print("⚠️ [exit_order_status_to_mobile_home] 아직 주문현황에서 완전히 빠지지 못함")
+        print("⚠️ [exit_order_status_to_mobile_home] 아직 모바일 주문 홈 복귀 안 됨")
 
     print("❌ [exit_order_status_to_mobile_home] 모바일 주문 홈 복귀 실패")
     return False
@@ -805,129 +972,252 @@ def back_to_order_status(d) -> bool:
     return d(text="주문현황").exists
 
 def check_one_job_status_by_search(d, job: dict) -> str:
-    if not enter_order_status(d):
-        print("❌ [status_check] 주문현황 진입 실패")
-        return ""
+    """
+    ✅ 리스트 검색 중 홈화면 이탈이 생기면
+    모바일 주문 홈 → 주문현황 재진입 → 같은 고객 검색 재시도
+    """
+    for attempt in range(2):
+        if is_unexpected_digital_sales_home(d):
+            if not recover_from_unexpected_home(d, f"상태확인 시작 직전 {job['name']}"):
+                return ""
 
-    # ✅ 검색 직전마다 무조건 일반 탭으로 복구
-    if not ensure_general_tab(d, force_click=True):
-        print("❌ [status_check] 일반 탭 복구 실패")
-        return ""
+        if not enter_order_status(d):
+            print("❌ [status_check] 주문현황 진입 실패")
+            return ""
 
-    dismiss_search_mode_dropdown_if_open(d)
+        if is_unexpected_digital_sales_home(d):
+            if attempt == 0 and recover_from_unexpected_home(d, f"주문현황 진입 직후 {job['name']}"):
+                continue
+            return ""
 
-    edit = find_search_edittext(d)
-    if edit is None:
-        print("❌ [status_check] 검색어 입력 EditText를 찾지 못함")
-        return ""
+        if not ensure_general_tab(d, force_click=True):
+            print("❌ [status_check] 일반 탭 복구 실패 → 이번 검색 중단")
+            return ""
 
-    query = job["name"]
-    print(f"🔎 [status_check] 검색 시작: {query}")
+        try:
+            if not d(text="고객/상호").exists:
+                print("❌ [status_check] 일반 탭 검증 실패(고객/상호 미표시) → 이번 검색 중단")
+                return ""
+        except Exception:
+            print("❌ [status_check] 일반 탭 검증 예외 → 이번 검색 중단")
+            return ""
 
-    ok = type_into_edittext(d, edit, query)
-    if not ok:
-        print(f"❌ [status_check] 검색어 입력 실패: {query}")
-        return ""
+        dismiss_search_mode_dropdown_if_open(d)
 
-    trigger_search(d, edit)
-    st, badge = get_first_status_badge_in_results(d)
-    print(f"🧾 [status_check] 검색 결과 상태: {st or 'NONE'}")
-    return st
+        edit = find_search_edittext(d)
+        if edit is None:
+            print("❌ [status_check] 검색어 입력 EditText를 찾지 못함")
+            return ""
+
+        query = job["name"]
+        print(f"🔎 [status_check] 검색 시작: {query}")
+
+        ok = type_into_edittext(d, edit, query)
+        if not ok:
+            print(f"❌ [status_check] 검색어 입력 실패: {query}")
+            return ""
+
+        if is_unexpected_digital_sales_home(d):
+            if attempt == 0 and recover_from_unexpected_home(d, f"검색어 입력 중 {job['name']}"):
+                continue
+            return ""
+
+        trigger_search(d, edit)
+
+        if is_unexpected_digital_sales_home(d):
+            if attempt == 0 and recover_from_unexpected_home(d, f"검색 실행 중 {job['name']}"):
+                continue
+            return ""
+
+        st, badge = get_first_status_badge_in_results(d)
+        print(f"🧾 [status_check] 검색 결과 상태: {st or 'NONE'}")
+        return st
+
+    return ""
 
 def try_open_ready_sign_detail(d, job: dict) -> bool:
-    if not enter_order_status(d):
-        print("❌ [ready_sign] 주문현황 진입 실패")
+    """
+    ✅ 인증완료 상세 진입 도중 홈화면 이탈이 생기면
+    복구 후 같은 고객으로 다시 검색
+    """
+    for attempt in range(2):
+        if is_unexpected_digital_sales_home(d):
+            if not recover_from_unexpected_home(d, f"상세진입 시작 직전 {job['name']}"):
+                return False
+
+        if not enter_order_status(d):
+            print("❌ [ready_sign] 주문현황 진입 실패")
+            return False
+
+        if is_unexpected_digital_sales_home(d):
+            if attempt == 0 and recover_from_unexpected_home(d, f"상세진입 주문현황 진입 직후 {job['name']}"):
+                continue
+            return False
+
+        if not ensure_general_tab(d, force_click=True):
+            print("❌ [ready_sign] 일반 탭 복구 실패")
+            return False
+
+        dismiss_search_mode_dropdown_if_open(d)
+
+        edit = find_search_edittext(d)
+        if edit is None:
+            print("❌ [ready_sign] 검색어 입력 EditText를 찾지 못함")
+            return False
+
+        query = job["name"]
+        print(f"🔎 [ready_sign] 인증완료 상세진입 검색: {query}")
+
+        ok = type_into_edittext(d, edit, query)
+        if not ok:
+            print(f"❌ [ready_sign] 검색어 입력 실패: {query}")
+            return False
+
+        if is_unexpected_digital_sales_home(d):
+            if attempt == 0 and recover_from_unexpected_home(d, f"상세진입 검색어 입력 중 {job['name']}"):
+                continue
+            return False
+
+        trigger_search(d, edit)
+
+        if is_unexpected_digital_sales_home(d):
+            if attempt == 0 and recover_from_unexpected_home(d, f"상세진입 검색 실행 중 {job['name']}"):
+                continue
+            return False
+
+        st, badge = get_first_status_badge_in_results(d)
+        print(f"🧾 [ready_sign] 검색 결과 상태: {st or 'NONE'}")
+
+        if st != "인증완료" or badge is None:
+            return False
+
+        open_detail_by_status_badge(d, badge)
+
+        if is_unexpected_digital_sales_home(d):
+            if attempt == 0 and recover_from_unexpected_home(d, f"상세진입 상세열기 중 {job['name']}"):
+                continue
+            return False
+
+        if match_detail_by_name_phone(d, job["name"], job["phone11"]):
+            print("✅ [ready_sign] 상세 고객명/전화번호 매칭 성공")
+            return True
+
+        print("❌ [ready_sign] 상세 고객명/전화번호 매칭 실패 → 주문현황으로 복귀")
+        back_to_order_status(d)
         return False
 
-    # ✅ 상세 진입 검색 전에도 무조건 일반 탭으로 복구
-    if not ensure_general_tab(d, force_click=True):
-        print("❌ [ready_sign] 일반 탭 복구 실패")
-        return False
-
-    dismiss_search_mode_dropdown_if_open(d)
-
-    edit = find_search_edittext(d)
-    if edit is None:
-        print("❌ [ready_sign] 검색어 입력 EditText를 찾지 못함")
-        return False
-
-    query = job["name"]
-    print(f"🔎 [ready_sign] 인증완료 상세진입 검색: {query}")
-
-    ok = type_into_edittext(d, edit, query)
-    if not ok:
-        print(f"❌ [ready_sign] 검색어 입력 실패: {query}")
-        return False
-
-    trigger_search(d, edit)
-
-    st, badge = get_first_status_badge_in_results(d)
-    print(f"🧾 [ready_sign] 검색 결과 상태: {st or 'NONE'}")
-
-    if st != "인증완료" or badge is None:
-        return False
-
-    open_detail_by_status_badge(d, badge)
-
-    if match_detail_by_name_phone(d, job["name"], job["phone11"]):
-        print("✅ [ready_sign] 상세 고객명/전화번호 매칭 성공")
-        return True
-
-    print("❌ [ready_sign] 상세 고객명/전화번호 매칭 실패 → 주문현황으로 복귀")
-    back_to_order_status(d)
     return False
 
 # ---------------------------
 # 인증발송
 # ---------------------------
 def send_auth_request(d, job: dict):
-    if not restart_digital_sales_app(d):
-        return (False, "APP_RESTART_FAIL")
+    """
+    ✅ 인증발송 중 홈화면 이탈이 생기면
+    모바일 주문 홈으로 복구 후 '주문접수부터' 다시 시도
+    """
+    for attempt in range(2):
+        if not restart_digital_sales_app(d):
+            return (False, "APP_RESTART_FAIL")
 
-    if not ensure_mobile_order_home(d):
-        return (False, "NOT_READY")
+        if not ensure_mobile_order_home(d):
+            return (False, "NOT_READY")
 
-    click_text_center(d, "일반 주문하기", 0.20, 0.55)
-    time.sleep(0.8)
+        if is_unexpected_digital_sales_home(d):
+            if not recover_from_unexpected_home(d, "인증발송 시작 직전"):
+                return (False, "UNEXPECTED_HOME")
 
-    if not d(text="주문접수").exists and not d(text="본인인증 요청").exists:
-        return (False, "NOT_ORDER_FORM")
+        click_text_center(d, "일반 주문하기", 0.20, 0.55)
+        time.sleep(0.8)
 
-    if d(text="개인").exists:
-        click_text_center(d, "개인", 0.15, 0.45)
-        time.sleep(0.2)
+        if is_unexpected_digital_sales_home(d):
+            if attempt == 0 and recover_from_unexpected_home(d, "인증발송 진입 직후"):
+                continue
+            return (False, "UNEXPECTED_HOME")
 
-    edits = d(className="android.widget.EditText")
-    if edits.count < 2:
-        return (False, "NO_EDITTEXT")
+        if not d(text="주문접수").exists and not d(text="본인인증 요청").exists:
+            return (False, "NOT_ORDER_FORM")
 
-    edits[0].click()
-    time.sleep(0.1)
-    edits[0].set_text(job["name"])
-
-    edits[1].click()
-    time.sleep(0.1)
-    edits[1].set_text(job["phone11"])
-
-    btn = d(text="본인인증 요청")
-    for _ in range(20):
-        if btn.exists and btn.info.get("enabled", False):
-            btn.click()
-            time.sleep(0.6)
-            break
-        time.sleep(0.2)
-
-    if not d(text="발송").exists:
-        for _ in range(40):
-            if d(text="발송").exists:
-                break
+        if d(text="개인").exists:
+            click_text_center(d, "개인", 0.15, 0.45)
             time.sleep(0.2)
 
-    if d(text="발송").exists:
-        click_text_center(d, "발송", 0.45, 0.95)
-        time.sleep(0.6)
+        edits = d(className="android.widget.EditText")
+        if edits.count < 2:
+            return (False, "NO_EDITTEXT")
 
-    return (True, "OK")
+        edits[0].click()
+        time.sleep(0.1)
+        edits[0].set_text(job["name"])
+        time.sleep(0.2)
+
+        if is_unexpected_digital_sales_home(d):
+            if attempt == 0 and recover_from_unexpected_home(d, f"인증발송 이름입력 중 {job['name']}"):
+                continue
+            return (False, "UNEXPECTED_HOME")
+
+        edits = d(className="android.widget.EditText")
+        if edits.count < 2:
+            return (False, "NO_EDITTEXT")
+
+        edits[1].click()
+        time.sleep(0.1)
+        edits[1].set_text(job["phone11"])
+        time.sleep(0.2)
+
+        if is_unexpected_digital_sales_home(d):
+            if attempt == 0 and recover_from_unexpected_home(d, f"인증발송 연락처입력 중 {job['name']}"):
+                continue
+            return (False, "UNEXPECTED_HOME")
+
+        btn = d(text="본인인증 요청")
+        clicked_req = False
+        for _ in range(20):
+            if is_unexpected_digital_sales_home(d):
+                break
+            try:
+                if btn.exists and btn.info.get("enabled", False):
+                    btn.click()
+                    time.sleep(0.6)
+                    clicked_req = True
+                    break
+            except Exception:
+                pass
+            time.sleep(0.2)
+
+        if is_unexpected_digital_sales_home(d):
+            if attempt == 0 and recover_from_unexpected_home(d, f"인증발송 버튼대기 중 {job['name']}"):
+                continue
+            return (False, "UNEXPECTED_HOME")
+
+        if not clicked_req:
+            return (False, "REQ_BUTTON_FAIL")
+
+        if not d(text="발송").exists:
+            for _ in range(40):
+                if is_unexpected_digital_sales_home(d):
+                    break
+                if d(text="발송").exists:
+                    break
+                time.sleep(0.2)
+
+        if is_unexpected_digital_sales_home(d):
+            if attempt == 0 and recover_from_unexpected_home(d, f"인증발송 팝업대기 중 {job['name']}"):
+                continue
+            return (False, "UNEXPECTED_HOME")
+
+        if d(text="발송").exists:
+            click_text_center(d, "발송", 0.45, 0.95)
+            time.sleep(0.6)
+
+        if is_unexpected_digital_sales_home(d):
+            if attempt == 0 and recover_from_unexpected_home(d, f"인증발송 최종단계 중 {job['name']}"):
+                continue
+            return (False, "UNEXPECTED_HOME")
+
+        return (True, "OK")
+
+    return (False, "UNEXPECTED_HOME")
 
 # ---------------------------
 # emulator loop
@@ -977,7 +1267,7 @@ def emulator_main_loop():
                         print(f"✅ 인증발송 성공: {job['name']} / {job['phone11']}")
                         notify(f"인증발송 성공: {job['name']} / {job['phone11']}")
                     else:
-                        if reason in ["APP_RESTART_FAIL", "NOT_READY"] and retry < AUTH_RETRY_MAX:
+                        if reason in ["APP_RESTART_FAIL", "NOT_READY", "UNEXPECTED_HOME"] and retry < AUTH_RETRY_MAX:
                             retry += 1
                             job["_retry"] = retry
                             print(f"⚠️ 인증발송 재시도 ({retry}/{AUTH_RETRY_MAX}) : {job['name']} / {job['phone11']} ({reason})")
