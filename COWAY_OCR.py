@@ -107,18 +107,52 @@ def find_open_modal():
     return None
 
 def find_input_near_label(modal, label_keywords):
+    def _read_value(el):
+        try:
+            v = (el.get_attribute("value") or "").strip()
+            if v:
+                return v
+        except Exception:
+            pass
+
+        try:
+            v = (el.get_attribute("textContent") or "").strip()
+            if v:
+                return v
+        except Exception:
+            pass
+
+        try:
+            v = (el.get_attribute("innerText") or "").strip()
+            if v:
+                return v
+        except Exception:
+            pass
+
+        try:
+            v = (el.text or "").strip()
+            if v:
+                return v
+        except Exception:
+            pass
+
+        return ""
+
     for kw in label_keywords:
         xpaths = [
-            f".//label[contains(normalize-space(.), '{kw}')]/following::input[not(@type='hidden')][1]",
-            f".//*[contains(normalize-space(.), '{kw}')]/following::input[not(@type='hidden')][1]",
-            f".//tr[.//*[contains(normalize-space(.), '{kw}')]]//input[not(@type='hidden')][1]",
+            f".//label[contains(normalize-space(.), '{kw}')]/following::*[((self::input or self::textarea or self::select) and not(@type='hidden'))][1]",
+            f".//*[contains(normalize-space(.), '{kw}')]/following::*[((self::input or self::textarea or self::select) and not(@type='hidden'))][1]",
+            f".//tr[.//*[contains(normalize-space(.), '{kw}')]]//*[ (self::input or self::textarea or self::select) and not(@type='hidden') ][1]",
+            f".//label[contains(normalize-space(.), '{kw}')]/following::*[self::td or self::span or self::div or self::p][1]",
+            f".//*[contains(normalize-space(.), '{kw}')]/following::*[self::td or self::span or self::div or self::p][1]",
         ]
+
         for xp in xpaths:
             try:
                 el = modal.find_element(By.XPATH, xp)
                 if el and el.is_displayed():
-                    v = (el.get_attribute("value") or "").strip()
-                    if v:
+                    v = _read_value(el)
+                    if v and v != kw and len(v) <= 300:
                         return v
             except Exception:
                 pass
@@ -134,12 +168,15 @@ def find_input_near_label(modal, label_keywords):
                 By.XPATH,
                 "./ancestor::*[contains(@class,'form-group') or contains(@class,'row') or contains(@class,'col') or self::tr][1]"
             )
-            cand = container.find_elements(By.XPATH, ".//input[not(@type='hidden')]")
+            cand = container.find_elements(
+                By.XPATH,
+                ".//*[( (self::input or self::textarea or self::select) and not(@type='hidden') ) or self::td or self::span or self::div or self::p]"
+            )
             for el in cand:
                 try:
                     if el.is_displayed():
-                        v = (el.get_attribute("value") or "").strip()
-                        if v:
+                        v = _read_value(el)
+                        if v and v != kw and len(v) <= 300:
                             return v
                 except Exception:
                     continue
@@ -185,6 +222,14 @@ def extract_fields_from_modal(modal):
     account = find_input_near_label(modal, ["계좌", "은행", "계좌번호", "결제정보", "결제"])
     zipcode = find_input_near_label(modal, ["우편번호", "우편", "ZIP", "postcode"])
 
+    product_name = find_input_near_label(modal, ["상품명", "제품명", "품목"])
+    model_name = find_input_near_label(modal, ["모델명", "모델코드", "상품코드", "모델", "제품모델", "상품모델"])
+    color_raw = find_input_near_label(modal, ["색상", "컬러", "색깔", "color", "Color"])
+    address = find_input_near_label(modal, ["설치주소", "설치 주소", "주소", "기본주소", "도로명주소"])
+    address_detail = find_input_near_label(modal, ["상세주소", "상세 주소", "나머지주소"])
+    manage_raw = find_input_near_label(modal, ["관리", "관리유형", "관리 유형", "관리방식", "관리 방식", "방문주기", "관리주기", "관리형태", "방문관리"])
+    contract_raw = find_input_near_label(modal, ["약정", "약정기간", "의무사용기간", "의무 사용기간", "계약기간", "사용기간"])
+
     phone11 = normalize_phone11_only_010(phone_raw)
 
     return {
@@ -194,8 +239,14 @@ def extract_fields_from_modal(modal):
         "phone11": (phone11 or "").strip(),
         "account": (account or "").strip(),
         "zipcode": (zipcode or "").strip(),
+        "product_name": (product_name or "").strip(),
+        "model_name": (model_name or "").strip(),
+        "color_raw": (color_raw or "").strip(),
+        "address": (address or "").strip(),
+        "address_detail": (address_detail or "").strip(),
+        "manage_raw": (manage_raw or "").strip(),
+        "contract_raw": (contract_raw or "").strip(),
     }
-
 # ---------------------------
 # uiautomator2 helpers
 # ---------------------------
@@ -928,14 +979,12 @@ def trigger_search(d, edit_obj):
 
     return True
 
-def get_first_status_badge_in_results(d):
+def get_status_badges_in_results(d, target_status: str = ""):
     """
-    ✅ 검색 결과 리스트에서 가장 위에 보이는 상태 배지 1개를 반환
-    중요:
-    - 기존 0.35*h 제한은 너무 아래쪽만 봐서 실제 첫 결과를 놓침
-    - 상단 헤더/검색영역 아래부터만 보되, 첫 결과 영역은 포함해야 함
+    ✅ 검색 결과 리스트에서 화면에 보이는 상태 배지들을 위에서부터 수집
+    target_status="인증완료" 처럼 주면 해당 상태만 수집
     """
-    status_texts = ["인증완료", "인증입력", "서명입력", "주문확정", "주문삭제", "주문불가"]
+    status_texts = [target_status] if target_status else ["인증완료", "인증입력", "서명입력", "주문확정", "주문삭제", "주문불가"]
 
     try:
         w, h = d.window_size()
@@ -954,33 +1003,48 @@ def get_first_status_badge_in_results(d):
                     info = o.info or {}
                     b = info.get("bounds", {})
 
-                    top = int(b.get("top", 0))
-                    bottom = int(b.get("bottom", 0))
                     left = int(b.get("left", 0))
+                    top = int(b.get("top", 0))
                     right = int(b.get("right", 0))
+                    bottom = int(b.get("bottom", 0))
 
-                    # 너무 위(탭/검색영역)는 제외하되,
-                    # 첫 번째 결과 행은 포함되도록 기준을 낮춤
                     if top < int(h * 0.20):
                         continue
-
-                    # 너무 아래/이상한 영역 제외
                     if bottom > int(h * 0.95):
                         continue
 
-                    found.append((top, left, st, o, (left, top, right, bottom)))
+                    found.append({
+                        "status": st,
+                        "bounds": (left, top, right, bottom),
+                    })
                 except Exception:
                     continue
 
+        found.sort(key=lambda x: (x["bounds"][1], x["bounds"][0]))
+
+        if target_status:
+            print(f"✅ [get_status_badges_in_results] {target_status} 후보 {len(found)}개")
+            for idx, item in enumerate(found, start=1):
+                print(f"   - 후보 {idx}: status={item['status']} bounds={item['bounds']}")
+
+        return found
+
+    except Exception as e:
+        print("❌ [get_status_badges_in_results] 예외:", e)
+        return []
+
+def get_first_status_badge_in_results(d):
+    """
+    ✅ 검색 결과 리스트에서 가장 위에 보이는 상태 배지 1개를 반환
+    """
+    try:
+        found = get_status_badges_in_results(d)
         if not found:
             return ("", None)
 
-        # 가장 위에 있는 결과 우선, 같은 줄이면 왼쪽 우선
-        found.sort(key=lambda x: (x[0], x[1]))
-        st = found[0][2]
-        obj = found[0][3]
-        print(f"✅ [get_first_status_badge_in_results] 첫 상태 배지 탐지: {st} / bounds={found[0][4]}")
-        return (st, obj)
+        first = found[0]
+        print(f"✅ [get_first_status_badge_in_results] 첫 상태 배지 탐지: {first['status']} / bounds={first['bounds']}")
+        return (first["status"], first)
 
     except Exception as e:
         print("❌ [get_first_status_badge_in_results] 예외:", e)
@@ -988,13 +1052,25 @@ def get_first_status_badge_in_results(d):
 
 def open_detail_by_status_badge(d, badge_obj) -> bool:
     try:
-        b = badge_obj.info.get("bounds", {})
-        cx = (int(b.get("left", 0)) + int(b.get("right", 0))) // 2
-        cy = (int(b.get("top", 0)) + int(b.get("bottom", 0))) // 2
+        if isinstance(badge_obj, dict):
+            left, top, right, bottom = badge_obj.get("bounds", (0, 0, 0, 0))
+        elif isinstance(badge_obj, tuple) and len(badge_obj) == 4:
+            left, top, right, bottom = badge_obj
+        else:
+            info = badge_obj.info or {}
+            b = info.get("bounds", {})
+            left = int(b.get("left", 0))
+            top = int(b.get("top", 0))
+            right = int(b.get("right", 0))
+            bottom = int(b.get("bottom", 0))
+
+        cx = (int(left) + int(right)) // 2
+        cy = (int(top) + int(bottom)) // 2
         d.click(cx, cy)
         time.sleep(0.8)
         return True
-    except Exception:
+    except Exception as e:
+        print("❌ [open_detail_by_status_badge] 예외:", e)
         return False
 
 def match_detail_by_name_phone(d, name: str, phone11: str) -> bool:
@@ -1200,6 +1276,12 @@ def check_one_job_status_by_search(d, job: dict) -> str:
 
         time.sleep(0.80)
 
+        ready_badges = get_status_badges_in_results(d, target_status="인증완료")
+        if ready_badges:
+            print(f"✅ [status_check] 인증완료 후보 {len(ready_badges)}개 감지")
+            print("🧾 [status_check] 검색 결과 상태: 인증완료")
+            return "인증완료"
+
         st, badge = get_first_status_badge_in_results(d)
         print(f"🧾 [status_check] 검색 결과 상태: {st or 'NONE'}")
         return st
@@ -1211,9 +1293,566 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
     ✅ 인증완료 상세 진입
     - 검색 결과에서 '인증완료' 핑크 배지 클릭
     - 상세 고객명 + 연락처가 웹 저장값과 완전 일치해야만 통과
-    - 일치 시 '주문 이어서 하기'를 눌러 전자서명 단계로 진입
+    - 일치 시 '주문 이어서 하기' 클릭
+    - 상품검색 화면에서 모델명 검색
+    - 색상 일치 후보가 정확히 1개일 때만 선택
+    - 판매구분에서 '렌탈' 선택
+    - 관리유형 = 모달의 관리와 일치해야 함
+    - 의무사용기간 = 모달의 약정과 일치해야 함
+    - 상품 담기 클릭 후 '상품 추가하기' 또는 '할인정보 입력' 화면까지 도달
     """
     global SIGN_IN_PROGRESS
+
+    def _abort(reason: str) -> bool:
+        print("🛑 [ready_sign]", reason)
+        set_stop(reason)
+        return False
+
+    def _normalize_color_keyword(raw: str) -> str:
+        s = str(raw or "").strip().lower()
+
+        pairs = [
+            ("화이트", "화이트"),
+            ("white", "화이트"),
+            ("베이지", "베이지"),
+            ("beige", "베이지"),
+            ("그레이", "그레이"),
+            ("gray", "그레이"),
+            ("grey", "그레이"),
+            ("블루", "블루"),
+            ("blue", "블루"),
+            ("핑크", "핑크"),
+            ("pink", "핑크"),
+            ("블랙", "블랙"),
+            ("black", "블랙"),
+            ("실버", "실버"),
+            ("silver", "실버"),
+        ]
+
+        for key, val in pairs:
+            if key in s:
+                return val
+        return ""
+
+    def _normalize_manage_target(raw: str) -> str:
+        s = re.sub(r"\s+", "", str(raw or "")).lower()
+        if not s:
+            return ""
+
+        if "자가" in s or "셀프" in s or "self" in s:
+            return "자가"
+
+        m = re.search(r"(\d+)\s*개?월", s)
+        if m:
+            return f"{m.group(1)}M"
+
+        m = re.search(r"(\d+)\s*m", s)
+        if m:
+            return f"{m.group(1)}M"
+
+        if "2m" in s:
+            return "2M"
+        if "4m" in s:
+            return "4M"
+
+        return str(raw or "").strip()
+
+    def _normalize_contract_target(raw: str) -> str:
+        s = re.sub(r"\s+", "", str(raw or ""))
+        if not s:
+            return ""
+
+        m = re.search(r"(\d+)년", s)
+        if m:
+            return f"{m.group(1)}년"
+
+        m = re.search(r"(\d+)개월", s)
+        if m:
+            months = int(m.group(1))
+            if months % 12 == 0:
+                return f"{months // 12}년"
+            return f"{months}개월"
+
+        return str(raw or "").strip()
+
+    def _scan_clickable_texts(candidates, y_min_ratio: float = 0.20, y_max_ratio: float = 0.98):
+        try:
+            w, h = d.window_size()
+            found = []
+            seen = set()
+
+            for cls in ["android.widget.TextView", "android.widget.Button"]:
+                objs = d(className=cls)
+                try:
+                    cnt = objs.count
+                except Exception:
+                    cnt = 0
+
+                for i in range(cnt):
+                    try:
+                        obj = objs[i]
+                        info = obj.info or {}
+                        txt = str(info.get("text") or "").strip()
+                        if not txt:
+                            continue
+
+                        if not any(c and c in txt for c in candidates):
+                            continue
+
+                        b = info.get("bounds", {})
+                        left = int(b.get("left", 0))
+                        top = int(b.get("top", 0))
+                        right = int(b.get("right", 0))
+                        bottom = int(b.get("bottom", 0))
+
+                        if top < int(h * y_min_ratio):
+                            continue
+                        if bottom > int(h * y_max_ratio):
+                            continue
+
+                        key = (txt, left, top, right, bottom)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+
+                        found.append({
+                            "text": txt,
+                            "bounds": (left, top, right, bottom),
+                            "class_name": cls,
+                        })
+                    except Exception:
+                        continue
+
+            found.sort(key=lambda x: (x["bounds"][1], x["bounds"][0]))
+            return found
+        except Exception as e:
+            print("❌ [ready_sign] 텍스트 스캔 예외:", e)
+            return []
+
+    def _click_first_text_candidate(candidates, y_min_ratio: float = 0.20, y_max_ratio: float = 0.98):
+        found = _scan_clickable_texts(candidates, y_min_ratio=y_min_ratio, y_max_ratio=y_max_ratio)
+        if not found:
+            return None
+
+        item = found[0]
+        left, top, right, bottom = item["bounds"]
+        cx = (left + right) // 2
+        cy = (top + bottom) // 2
+        d.click(cx, cy)
+        time.sleep(2.0)
+        return item
+
+    def _find_product_search_edittext():
+        try:
+            w, h = d.window_size()
+            edits = d(className="android.widget.EditText")
+            cnt = edits.count
+
+            best = None
+            best_w = 0
+
+            for i in range(cnt):
+                try:
+                    e = edits[i]
+                    b = e.info.get("bounds", {})
+                    left = int(b.get("left", 0))
+                    top = int(b.get("top", 0))
+                    right = int(b.get("right", 0))
+                    bottom = int(b.get("bottom", 0))
+                    bw = right - left
+
+                    if top < int(h * 0.10) or top > int(h * 0.35):
+                        continue
+
+                    if bw > best_w:
+                        best_w = bw
+                        best = e
+                except Exception:
+                    continue
+
+            return best
+        except Exception:
+            return None
+
+    def _wait_product_search_ready(timeout_sec: float = 8.0) -> bool:
+        end_at = time.time() + timeout_sec
+
+        while time.time() < end_at:
+            try:
+                if is_unexpected_digital_sales_home(d):
+                    return False
+
+                has_title = d(text="상품검색").exists or d(text="주문접수").exists
+                has_search_btn = d(text="검색").exists
+                edit = _find_product_search_edittext()
+
+                if has_title and has_search_btn and edit is not None:
+                    print("✅ [ready_sign] 상품검색 화면 준비 완료")
+                    time.sleep(0.4)
+                    return True
+            except Exception:
+                pass
+
+            time.sleep(0.25)
+
+        print("❌ [ready_sign] 상품검색 화면 준비 실패")
+        return False
+
+    def _search_product_by_model(model_query: str) -> bool:
+        if not _wait_product_search_ready(timeout_sec=8.0):
+            return False
+
+        edit = _find_product_search_edittext()
+        if edit is None:
+            print("❌ [ready_sign] 상품검색 입력창을 찾지 못함")
+            return False
+
+        print(f"🔎 [ready_sign] 모델명 검색: {model_query}")
+        ok = type_into_edittext(d, edit, model_query)
+        if not ok:
+            print(f"❌ [ready_sign] 모델명 입력 실패: {model_query}")
+            return False
+
+        time.sleep(0.35)
+
+        if d(text="검색").exists:
+            click_text_center(d, "검색", 0.10, 0.35)
+        else:
+            try:
+                d.press("enter")
+            except Exception:
+                return False
+
+        time.sleep(2.0)
+        return True
+
+    def _collect_product_candidates(model_query: str):
+        try:
+            w, h = d.window_size()
+
+            query_norm = re.sub(r"\s+", "", str(model_query or "")).upper()
+            model_keys = [query_norm]
+            if "_" in query_norm:
+                model_keys.append(query_norm.split("_")[0])
+
+            tvs = d(className="android.widget.TextView")
+            cnt = tvs.count
+
+            candidates = []
+            seen = set()
+
+            for i in range(cnt):
+                try:
+                    tv = tvs[i]
+                    info = tv.info or {}
+                    txt = str(info.get("text") or "").strip()
+                    if not txt:
+                        continue
+
+                    if "," not in txt:
+                        continue
+
+                    txt_norm = re.sub(r"\s+", "", txt).upper()
+                    if not any(k and k in txt_norm for k in model_keys):
+                        continue
+
+                    b = info.get("bounds", {})
+                    left = int(b.get("left", 0))
+                    top = int(b.get("top", 0))
+                    right = int(b.get("right", 0))
+                    bottom = int(b.get("bottom", 0))
+
+                    if top < int(h * 0.18) or bottom > int(h * 0.92):
+                        continue
+
+                    if txt in seen:
+                        continue
+                    seen.add(txt)
+
+                    parts = [p.strip() for p in txt.split(",")]
+                    color_text = parts[-1] if len(parts) >= 3 else txt
+
+                    candidates.append({
+                        "text": txt,
+                        "color_text": color_text,
+                        "obj": tv,
+                        "bounds": (left, top, right, bottom),
+                    })
+                except Exception:
+                    continue
+
+            print(f"✅ [ready_sign] 상품후보 수집: {len(candidates)}개")
+            for c in candidates:
+                print("   - 후보:", c["text"])
+
+            return candidates
+
+        except Exception as e:
+            print("❌ [ready_sign] 상품후보 수집 예외:", e)
+            return []
+
+    def _choose_and_click_product(model_query: str, color_raw: str) -> bool:
+        desired_color = _normalize_color_keyword(color_raw)
+        if not desired_color:
+            return _abort(f"전자서명 중단: 색상 추출 실패 / 고객={job['name']} / 원본색상={color_raw}")
+
+        candidates = _collect_product_candidates(model_query)
+        if not candidates:
+            return _abort(f"전자서명 중단: 상품검색 결과 없음 / 고객={job['name']} / 모델={model_query}")
+
+        matched = []
+        for c in candidates:
+            full_text = f"{c['text']} {c['color_text']}"
+            if desired_color in full_text:
+                matched.append(c)
+
+        if len(matched) == 0:
+            return _abort(
+                f"전자서명 중단: 색상 일치 후보 없음 / 고객={job['name']} / 모델={model_query} / 색상={color_raw}"
+            )
+
+        if len(matched) > 1:
+            joined = " | ".join([m["text"] for m in matched])
+            return _abort(
+                f"전자서명 중단: 색상 후보 {len(matched)}개로 모호함 / 고객={job['name']} / 색상={color_raw} / 후보={joined}"
+            )
+
+        chosen = matched[0]
+        left, top, right, bottom = chosen["bounds"]
+        cx = (left + right) // 2
+        cy = (top + bottom) // 2
+
+        print(f"✅ [ready_sign] 최종 상품 선택: {chosen['text']}")
+        d.click(cx, cy)
+        time.sleep(2.2)
+        return True
+
+    def _is_search_return_popup_open() -> bool:
+        popup_candidates = [
+            "상품 검색 화면으로 이동하시겠습니까",
+            "상품 검색 화면으로 이동하시겠습니까?",
+            "이동하시겠습니까",
+        ]
+
+        for t in popup_candidates:
+            try:
+                if d(text=t).exists:
+                    return True
+            except Exception:
+                pass
+
+            try:
+                if d(textContains=t).exists:
+                    return True
+            except Exception:
+                pass
+
+        return False
+
+    def _dismiss_search_return_popup_if_open() -> bool:
+        if not _is_search_return_popup_open():
+            return False
+
+        print("⚠️ [ready_sign] 상품검색 복귀 팝업 감지 → 취소 후 재확인")
+
+        clicked = False
+
+        try:
+            if d(text="취소").exists:
+                d(text="취소").click()
+                clicked = True
+            elif d(textContains="취소").exists:
+                d(textContains="취소").click()
+                clicked = True
+            else:
+                clicked = click_text_center(d, "취소", 0.45, 0.98)
+        except Exception:
+            clicked = False
+
+        time.sleep(2.0)
+
+        try:
+            if _is_search_return_popup_open():
+                print("⚠️ [ready_sign] 상품검색 복귀 팝업이 아직 남아있음")
+            else:
+                print("✅ [ready_sign] 상품검색 복귀 팝업 해제 완료")
+        except Exception:
+            pass
+
+        return clicked
+
+    def _wait_product_option_ready(timeout_sec: float = 10.0) -> bool:
+        end_at = time.time() + timeout_sec
+        stable_ok_count = 0
+
+        while time.time() < end_at:
+            try:
+                if is_unexpected_digital_sales_home(d):
+                    return False
+
+                if _is_search_return_popup_open():
+                    _dismiss_search_return_popup_if_open()
+                    stable_ok_count = 0
+                    continue
+
+                has_title = d(text="상품선택").exists or d(text="주문접수").exists
+                has_sale_group = d(text="판매구분").exists
+
+                if has_title and has_sale_group:
+                    stable_ok_count += 1
+                    if stable_ok_count >= 2:
+                        print("✅ [ready_sign] 판매구분 화면 준비 완료")
+                        time.sleep(0.4)
+                        return True
+                    time.sleep(0.35)
+                    continue
+
+                stable_ok_count = 0
+            except Exception:
+                stable_ok_count = 0
+
+            time.sleep(0.30)
+
+        print("❌ [ready_sign] 판매구분 화면 준비 실패")
+        return False
+
+    def _select_rental_option() -> bool:
+        if not _wait_product_option_ready(timeout_sec=10.0):
+            return _abort(f"전자서명 중단: 판매구분 화면 진입 실패 / 고객={job['name']}")
+
+        section_open_attempted = False
+
+        for attempt in range(4):
+            if _is_search_return_popup_open():
+                _dismiss_search_return_popup_if_open()
+
+            has_rental = False
+            has_cash = False
+
+            try:
+                has_rental = d(text="렌탈").exists
+            except Exception:
+                has_rental = False
+
+            try:
+                has_cash = d(text="일시불").exists
+            except Exception:
+                has_cash = False
+
+            if has_rental and has_cash:
+                ok_click = click_text_center(d, "렌탈", 0.35, 0.90)
+                if not ok_click:
+                    return _abort(f"전자서명 중단: 렌탈 옵션 클릭 실패 / 고객={job['name']}")
+
+                time.sleep(2.0)
+                print(f"✅ [ready_sign] 렌탈 선택 완료: {job['name']}")
+                return True
+
+            if (not section_open_attempted) and d(text="판매구분").exists:
+                print(f"ℹ️ [ready_sign] 판매구분 옵션 재확인/펼치기 시도 {attempt + 1}/4")
+                click_text_center(d, "판매구분", 0.35, 0.90)
+                time.sleep(2.0)
+                section_open_attempted = True
+                continue
+
+            print(f"⚠️ [ready_sign] 판매구분 옵션 재조회 {attempt + 1}/4")
+            time.sleep(1.0)
+
+        return _abort(f"전자서명 중단: 판매구분 렌탈/일시불 옵션 미검출 / 고객={job['name']}")
+
+    def _select_manage_type(manage_raw: str) -> bool:
+        target = _normalize_manage_target(manage_raw)
+        if not target:
+            return _abort(f"전자서명 중단: 모달 관리 추출 실패 / 고객={job['name']} / 원본관리={manage_raw}")
+
+        if target == "자가":
+            candidates = ["자가관리", "자가", "셀프"]
+        else:
+            candidates = [f"방문관리-{target}", target, target.replace("M", "개월"), target.replace("M", "개월관리")]
+
+        print(f"🔎 [ready_sign] 관리유형 선택 목표: {target}")
+
+        item = _click_first_text_candidate(candidates, y_min_ratio=0.40, y_max_ratio=0.92)
+        if item is not None:
+            print(f"✅ [ready_sign] 관리유형 선택 완료: {item['text']}")
+            return True
+
+        if d(text="관리유형").exists:
+            click_text_center(d, "관리유형", 0.35, 0.90)
+            time.sleep(2.0)
+
+        item = _click_first_text_candidate(candidates, y_min_ratio=0.40, y_max_ratio=0.95)
+        if item is not None:
+            print(f"✅ [ready_sign] 관리유형 선택 완료: {item['text']}")
+            return True
+
+        try:
+            w, h = d.window_size()
+            d.swipe(int(w * 0.50), int(h * 0.82), int(w * 0.50), int(h * 0.60), 0.20)
+            time.sleep(0.6)
+        except Exception:
+            pass
+
+        item = _click_first_text_candidate(candidates, y_min_ratio=0.35, y_max_ratio=0.98)
+        if item is not None:
+            print(f"✅ [ready_sign] 관리유형 선택 완료: {item['text']}")
+            return True
+
+        return _abort(f"전자서명 중단: 관리유형 일치 옵션 없음 / 고객={job['name']} / 모달관리={manage_raw} / 목표={target}")
+
+    def _select_contract_period(contract_raw: str) -> bool:
+        target = _normalize_contract_target(contract_raw)
+        if not target:
+            return _abort(f"전자서명 중단: 모달 약정 추출 실패 / 고객={job['name']} / 원본약정={contract_raw}")
+
+        print(f"🔎 [ready_sign] 의무사용기간 선택 목표: {target}")
+
+        item = _click_first_text_candidate([target], y_min_ratio=0.45, y_max_ratio=0.98)
+        if item is not None:
+            print(f"✅ [ready_sign] 의무사용기간 선택 완료: {item['text']}")
+            return True
+
+        if d(text="의무사용기간").exists:
+            click_text_center(d, "의무사용기간", 0.45, 0.98)
+            time.sleep(2.0)
+
+        item = _click_first_text_candidate([target], y_min_ratio=0.45, y_max_ratio=0.98)
+        if item is not None:
+            print(f"✅ [ready_sign] 의무사용기간 선택 완료: {item['text']}")
+            return True
+
+        try:
+            w, h = d.window_size()
+            d.swipe(int(w * 0.50), int(h * 0.82), int(w * 0.50), int(h * 0.58), 0.20)
+            time.sleep(0.6)
+        except Exception:
+            pass
+
+        item = _click_first_text_candidate([target], y_min_ratio=0.40, y_max_ratio=0.98)
+        if item is not None:
+            print(f"✅ [ready_sign] 의무사용기간 선택 완료: {item['text']}")
+            return True
+
+        return _abort(f"전자서명 중단: 의무사용기간 일치 옵션 없음 / 고객={job['name']} / 모달약정={contract_raw} / 목표={target}")
+
+    def _click_add_product() -> bool:
+        if not d(text="상품 담기").exists:
+            return _abort(f"전자서명 중단: 상품 담기 버튼 미검출 / 고객={job['name']}")
+
+        click_text_center(d, "상품 담기", 0.85, 0.99)
+        time.sleep(2.0)
+
+        for _ in range(20):
+            if is_unexpected_digital_sales_home(d):
+                return _abort(f"전자서명 중단: 상품 담기 후 홈이탈 / 고객={job['name']}")
+
+            if d(text="상품 추가하기").exists or d(text="할인정보 입력").exists:
+                print(f"✅ [ready_sign] 상품 담기 완료 후 다음 화면 도달: {job['name']}")
+                return True
+
+            time.sleep(0.25)
+
+        return _abort(f"전자서명 중단: 상품 담기 후 다음 화면 미도달 / 고객={job['name']}")
 
     for attempt in range(2):
         if is_unexpected_digital_sales_home(d):
@@ -1278,40 +1917,127 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
             return False
 
         time.sleep(0.80)
-        st, badge = get_first_status_badge_in_results(d)
-        print(f"🧾 [ready_sign] 검색 결과 상태: {st or 'NONE'}")
+        ready_badges = get_status_badges_in_results(d, target_status="인증완료")
+        print(f"🧾 [ready_sign] 인증완료 후보 수: {len(ready_badges)}")
 
-        if st != "인증완료" or badge is None:
+        if not ready_badges:
             return False
 
-        print(f"✅ [ready_sign] 인증완료 배지 클릭 시도: {job['name']}")
-        open_detail_by_status_badge(d, badge)
-        time.sleep(0.90)
+        matched_badge = None
+
+        for idx, badge in enumerate(ready_badges, start=1):
+            print(f"✅ [ready_sign] 인증완료 후보 확인 {idx}/{len(ready_badges)}: bounds={badge['bounds']}")
+
+            ok_open = open_detail_by_status_badge(d, badge)
+            if not ok_open:
+                print(f"⚠️ [ready_sign] 인증완료 후보 열기 실패 {idx}/{len(ready_badges)}")
+                continue
+
+            time.sleep(0.90)
+
+            if is_unexpected_digital_sales_home(d):
+                if attempt == 0 and recover_from_unexpected_home(d, f"상세진입 상세열기 중 {job['name']}"):
+                    time.sleep(0.8)
+                    matched_badge = "__RETRY__"
+                    break
+                return False
+
+            if match_detail_by_name_phone(d, job["name"], job["phone11"]):
+                print(f"✅ [ready_sign] 상세 고객명/전화번호 매칭 성공 {idx}/{len(ready_badges)}")
+                matched_badge = badge
+                break
+
+            print(f"⚠️ [ready_sign] 상세 불일치 {idx}/{len(ready_badges)} → 다음 인증완료 후보 확인")
+            print(f"   - 기대 이름/번호: {job['name']} / {job['phone11']}")
+            back_to_order_status(d)
+
+            ready_state_after_back = wait_until_order_status_ready(d, timeout_sec=8.0)
+            if ready_state_after_back == "home":
+                if attempt == 0 and recover_from_unexpected_home(d, f"상세불일치 복귀중 홈이탈 {job['name']}"):
+                    time.sleep(0.8)
+                    matched_badge = "__RETRY__"
+                    break
+                return False
+
+            if ready_state_after_back == "timeout":
+                if attempt == 0:
+                    ok_refresh = refresh_order_status_by_reenter(d)
+                    if ok_refresh:
+                        time.sleep(1.0)
+                        matched_badge = "__RETRY__"
+                        break
+                return False
+
+            if not ensure_general_tab(d, force_click=True):
+                return False
+
+            time.sleep(0.30)
+
+        if matched_badge == "__RETRY__":
+            continue
+
+        if matched_badge is None:
+            notify(f"인증완료 후보 {len(ready_badges)}개 모두 전화번호 불일치: {job['name']} / {job['phone11']}")
+            print("❌ [ready_sign] 인증완료 후보 전체 확인했지만 전화번호 일치 없음")
+            return False
+
+        search_model = (job.get("model_name") or job.get("product_name") or "").strip()
+        color_raw = (job.get("color_raw") or "").strip()
+        manage_raw = (job.get("manage_raw") or "").strip()
+        contract_raw = (job.get("contract_raw") or "").strip()
+
+        if not search_model:
+            return _abort(f"전자서명 중단: 모달 모델명 추출 실패 / 고객={job['name']}")
+
+        if not color_raw:
+            return _abort(f"전자서명 중단: 모달 색상 추출 실패 / 고객={job['name']} / 모델={search_model}")
+
+        if not manage_raw:
+            return _abort(f"전자서명 중단: 모달 관리 추출 실패 / 고객={job['name']} / 모델={search_model}")
+
+        if not contract_raw:
+            return _abort(f"전자서명 중단: 모달 약정 추출 실패 / 고객={job['name']} / 모델={search_model}")
+
+        if not d(text="주문 이어서 하기").exists:
+            return _abort(f"전자서명 중단: 주문 이어서 하기 버튼 미검출 / 고객={job['name']}")
+
+        click_text_center(d, "주문 이어서 하기", 0.20, 0.85)
+        time.sleep(2.0)
 
         if is_unexpected_digital_sales_home(d):
-            if attempt == 0 and recover_from_unexpected_home(d, f"상세진입 상세열기 중 {job['name']}"):
-                continue
+            return _abort(f"전자서명 중단: 주문 이어서 하기 클릭 후 홈이탈 / 고객={job['name']}")
+
+        if not _search_product_by_model(search_model):
+            return _abort(f"전자서명 중단: 모델 검색 실패 / 고객={job['name']} / 모델={search_model}")
+
+        if is_unexpected_digital_sales_home(d):
+            return _abort(f"전자서명 중단: 모델 검색 후 홈이탈 / 고객={job['name']} / 모델={search_model}")
+
+        if not _choose_and_click_product(search_model, color_raw):
             return False
 
-        if match_detail_by_name_phone(d, job["name"], job["phone11"]):
-            print("✅ [ready_sign] 상세 고객명/전화번호 매칭 성공")
+        if is_unexpected_digital_sales_home(d):
+            return _abort(f"전자서명 중단: 상품 선택 후 홈이탈 / 고객={job['name']} / 모델={search_model}")
 
-            if d(text="주문 이어서 하기").exists:
-                click_text_center(d, "주문 이어서 하기", 0.20, 0.80)
-                time.sleep(1.0)
-
-                SIGN_IN_PROGRESS = True
-                sign_started.add(job["phone11"])
-                notify(f"전자서명 단계 진입: {job['name']} / {job['phone11']}")
-                print(f"✅ [ready_sign] 주문 이어서 하기 클릭 완료: {job['name']}")
-                return True
-
-            print("❌ [ready_sign] 주문 이어서 하기 버튼을 찾지 못함")
+        if not _select_rental_option():
             return False
 
-        print("❌ [ready_sign] 상세 고객명/전화번호 매칭 실패 → 주문현황으로 복귀")
-        back_to_order_status(d)
-        return False
+        if not _select_manage_type(manage_raw):
+            return False
+
+        if not _select_contract_period(contract_raw):
+            return False
+
+        if not _click_add_product():
+            return False
+
+        SIGN_IN_PROGRESS = True
+        sign_started.add(job["phone11"])
+        notify(
+            f"전자서명 옵션선택 완료: {job['name']} / {job['phone11']} / 모델={search_model} / 색상={color_raw} / 관리={manage_raw} / 약정={contract_raw}"
+        )
+        print(f"✅ [ready_sign] 상품검색/색상/렌탈/관리/약정/상품담기 완료: {job['name']}")
+        return True
 
     return False
 # ---------------------------
@@ -1538,7 +2264,7 @@ def emulator_main_loop():
                 if st == "인증완료":
                     ok = try_open_ready_sign_detail(d, j)
                     if ok:
-                        notify(f"✅ 인증완료 확인(매칭 OK): {j['name']} / {j['phone11']} → 주문 이어서 하기 진입")
+                        notify(f"✅ 인증완료 확인(매칭 OK): {j['name']} / {j['phone11']} → 관리/약정/상품담기 완료")
                     else:
                         back_to_order_status(d)
 
@@ -1608,6 +2334,13 @@ while True:
         phone11 = data.get("phone11", "")
         account = data.get("account", "")
         zipcode = data.get("zipcode", "")
+        product_name = data.get("product_name", "")
+        model_name = data.get("model_name", "")
+        color_raw = data.get("color_raw", "")
+        address = data.get("address", "")
+        address_detail = data.get("address_detail", "")
+        manage_raw = data.get("manage_raw", "")
+        contract_raw = data.get("contract_raw", "")
 
         if not phone11:
             print("❌ 전화번호 추출 실패 → 건너뜀")
@@ -1628,6 +2361,13 @@ while True:
         print("전화번호 원문:", phone_raw)
         print("계좌:", account)
         print("우편번호:", zipcode)
+        print("상품명:", product_name)
+        print("모델명:", model_name)
+        print("색상:", color_raw)
+        print("주소:", address)
+        print("상세주소:", address_detail)
+        print("관리:", manage_raw)
+        print("약정:", contract_raw)
         print("-" * 40)
 
         auth_q.put({
@@ -1636,6 +2376,13 @@ while True:
             "birth": birth,
             "account": account,
             "zipcode": zipcode,
+            "product_name": product_name,
+            "model_name": model_name,
+            "color_raw": color_raw,
+            "address": address,
+            "address_detail": address_detail,
+            "manage_raw": manage_raw,
+            "contract_raw": contract_raw,
             "_retry": 0,
         })
 
