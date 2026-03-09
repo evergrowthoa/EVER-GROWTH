@@ -238,8 +238,23 @@ def extract_fields_from_modal(modal):
     if address_basic and address_detail and address_basic == address_detail:
         address_basic = ""
 
-    manage_raw = find_input_near_label(modal, ["관리", "관리유형", "관리 유형", "관리방식", "관리 방식", "방문주기", "관리주기", "관리형태", "방문관리"])
-    contract_raw = find_input_near_label(modal, ["약정", "약정기간", "의무사용기간", "의무 사용기간", "계약기간", "사용기간"])
+    manage_raw = find_input_near_label(
+        modal,
+        ["관리", "관리유형", "관리 유형", "관리방식", "관리 방식", "방문주기", "관리주기", "관리형태", "방문관리"]
+    )
+    contract_raw = find_input_near_label(
+        modal,
+        ["약정", "약정기간", "의무사용기간", "의무 사용기간", "계약기간", "사용기간"]
+    )
+
+    discount_raw = find_input_near_label(
+        modal,
+        ["할인", "할인유형", "할인 유형", "반값", "프로모션", "혜택"]
+    )
+    amount_raw = find_input_near_label(
+        modal,
+        ["월요금", "예상월요금", "예상 월요금", "월 렌탈료", "렌탈료", "월금액", "월 금액", "납부금액", "월 납부금액", "금액"]
+    )
 
     phone11 = normalize_phone11_only_010(phone_raw)
 
@@ -258,6 +273,8 @@ def extract_fields_from_modal(modal):
         "address_detail": (address_detail or "").strip(),
         "manage_raw": (manage_raw or "").strip(),
         "contract_raw": (contract_raw or "").strip(),
+        "discount_raw": (discount_raw or "").strip(),
+        "amount_raw": (amount_raw or "").strip(),
     }
 # ---------------------------
 # uiautomator2 helpers
@@ -1311,7 +1328,9 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
     - 판매구분에서 '렌탈' 선택
     - 관리유형 = 모달의 관리와 일치해야 함
     - 의무사용기간 = 모달의 약정과 일치해야 함
-    - 상품 담기 클릭 후 '상품 추가하기' 또는 '할인정보 입력' 화면까지 도달
+    - 상품 담기 → 할인정보 입력
+    - 할인 페이지에서 반값/총금액 검증
+    - 결제정보 선택 페이지에서 정기결제 수단 선택 클릭 후 '추가' 버튼까지 진행
     """
     global SIGN_IN_PROGRESS
 
@@ -1386,6 +1405,25 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
             return f"{months}개월"
 
         return str(raw or "").strip()
+
+    def _normalize_discount_target(raw: str) -> str:
+        s = re.sub(r"\s+", "", str(raw or ""))
+        if not s:
+            return ""
+
+        if "반값" in s:
+            m = re.search(r"(\d+)\s*개?월", str(raw or ""))
+            if m:
+                return f"{m.group(1)}개월반값"
+            m = re.search(r"(\d+)", s)
+            if m:
+                return f"{m.group(1)}개월반값"
+            return "반값"
+
+        return s
+
+    def _normalize_amount_digits(raw: str) -> str:
+        return normalize_digits(raw or "")
 
     def _scan_clickable_texts(candidates, y_min_ratio: float = 0.20, y_max_ratio: float = 0.98):
         try:
@@ -1867,24 +1905,383 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
 
         return _abort(f"전자서명 중단: 의무사용기간 일치 옵션 없음 / 고객={job['name']} / 모달약정={contract_raw} / 목표={target}")
 
-    def _click_add_product() -> bool:
+    def _collect_visible_text_items(y_min_ratio: float = 0.0, y_max_ratio: float = 1.0):
+        try:
+            w, h = d.window_size()
+            found = []
+            seen = set()
+
+            for cls in ["android.widget.TextView", "android.widget.Button"]:
+                objs = d(className=cls)
+                try:
+                    cnt = objs.count
+                except Exception:
+                    cnt = 0
+
+                for i in range(cnt):
+                    try:
+                        obj = objs[i]
+                        info = obj.info or {}
+                        txt = str(info.get("text") or "").strip()
+                        if not txt:
+                            continue
+
+                        b = info.get("bounds", {})
+                        left = int(b.get("left", 0))
+                        top = int(b.get("top", 0))
+                        right = int(b.get("right", 0))
+                        bottom = int(b.get("bottom", 0))
+                        cy = (top + bottom) // 2
+
+                        if cy < int(h * y_min_ratio) or cy > int(h * y_max_ratio):
+                            continue
+
+                        key = (txt, left, top, right, bottom, cls)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+
+                        found.append({
+                            "text": txt,
+                            "bounds": (left, top, right, bottom),
+                            "class_name": cls,
+                        })
+                    except Exception:
+                        continue
+
+            found.sort(key=lambda x: (x["bounds"][1], x["bounds"][0]))
+            return found
+        except Exception as e:
+            print("❌ [ready_sign] 화면 텍스트 수집 예외:", e)
+            return []
+
+    def _wait_discount_page_ready(timeout_sec: float = 12.0) -> bool:
+        end_at = time.time() + timeout_sec
+        stable_ok_count = 0
+
+        while time.time() < end_at:
+            try:
+                if is_unexpected_digital_sales_home(d):
+                    return False
+
+                has_title = d(text="할인 선택").exists or d(textContains="할인 선택").exists
+                has_next = d(text="다음").exists
+
+                if has_title and has_next:
+                    stable_ok_count += 1
+                    if stable_ok_count >= 2:
+                        print("✅ [ready_sign] 할인정보 입력 화면 준비 완료")
+                        time.sleep(0.5)
+                        return True
+                else:
+                    stable_ok_count = 0
+            except Exception:
+                stable_ok_count = 0
+
+            time.sleep(0.4)
+
+        print("❌ [ready_sign] 할인정보 입력 화면 준비 실패")
+        return False
+
+    def _scroll_discount_down_once() -> bool:
+        try:
+            w, h = d.window_size()
+            d.swipe(int(w * 0.50), int(h * 0.82), int(w * 0.50), int(h * 0.34), 0.25)
+            time.sleep(1.4)
+            return True
+        except Exception:
+            return False
+
+    def _discount_page_has_target(target_discount: str) -> bool:
+        items = _collect_visible_text_items(0.10, 0.96)
+
+        for it in items:
+            norm = re.sub(r"\s+", "", it["text"])
+            if not norm:
+                continue
+
+            if target_discount == "반값":
+                if "반값" in norm:
+                    return True
+            else:
+                if target_discount and target_discount in norm:
+                    return True
+
+        return False
+
+    def _verify_total_amount_row(expected_amount_digits: str) -> bool:
+        items = _collect_visible_text_items(0.40, 0.99)
+
+        total_rows = []
+        for it in items:
+            norm = re.sub(r"\s+", "", it["text"])
+            if "총금액" in norm:
+                left, top, right, bottom = it["bounds"]
+                cy = (top + bottom) // 2
+                total_rows.append(cy)
+
+        if not total_rows:
+            print("⚠️ [ready_sign] 총 금액 행 미검출")
+            return False
+
+        row_cy = sorted(total_rows)[-1]
+        row_items = []
+
+        for it in items:
+            left, top, right, bottom = it["bounds"]
+            cy = (top + bottom) // 2
+            if abs(cy - row_cy) <= 100:
+                row_items.append(it)
+
+        has_receipt_zero = False
+        amount_match = False
+
+        for it in row_items:
+            norm = re.sub(r"\s+", "", it["text"])
+            digits = normalize_digits(norm)
+
+            if "수납0원" in norm or ("수납" in norm and digits == "0"):
+                has_receipt_zero = True
+
+            if digits and digits == expected_amount_digits:
+                amount_match = True
+
+        print(
+            f"🔎 [ready_sign] 총금액 검증 / 수납0원={has_receipt_zero} / 금액일치={amount_match} / 기대금액={expected_amount_digits}"
+        )
+        return has_receipt_zero and amount_match
+
+    def _click_add_product_and_go_discount() -> bool:
         if not d(text="상품 담기").exists:
             return _abort(f"전자서명 중단: 상품 담기 버튼 미검출 / 고객={job['name']}")
 
         click_text_center(d, "상품 담기", 0.85, 0.99)
         time.sleep(2.0)
 
-        for _ in range(20):
+        for _ in range(24):
             if is_unexpected_digital_sales_home(d):
                 return _abort(f"전자서명 중단: 상품 담기 후 홈이탈 / 고객={job['name']}")
 
-            if d(text="상품 추가하기").exists or d(text="할인정보 입력").exists:
-                print(f"✅ [ready_sign] 상품 담기 완료 후 다음 화면 도달: {job['name']}")
+            has_add_more = False
+            has_discount_btn = False
+
+            try:
+                has_add_more = d(text="상품 추가하기").exists
+            except Exception:
+                has_add_more = False
+
+            try:
+                has_discount_btn = d(text="할인정보 입력").exists
+            except Exception:
+                has_discount_btn = False
+
+            if has_add_more or has_discount_btn:
+                if not has_discount_btn:
+                    return _abort(f"전자서명 중단: 할인정보 입력 버튼 미검출 / 고객={job['name']}")
+
+                ok_click = click_text_center(d, "할인정보 입력", 0.35, 0.90)
+                if not ok_click:
+                    return _abort(f"전자서명 중단: 할인정보 입력 버튼 클릭 실패 / 고객={job['name']}")
+
+                time.sleep(2.0)
+
+                if not _wait_discount_page_ready(timeout_sec=12.0):
+                    return _abort(f"전자서명 중단: 할인정보 입력 화면 진입 실패 / 고객={job['name']}")
+
+                print(f"✅ [ready_sign] 상품 담기 후 할인정보 입력 화면 진입 완료: {job['name']}")
                 return True
 
             time.sleep(0.25)
 
-        return _abort(f"전자서명 중단: 상품 담기 후 다음 화면 미도달 / 고객={job['name']}")
+        return _abort(f"전자서명 중단: 상품 담기 완료 팝업 미검출 / 고객={job['name']}")
+
+    def _verify_discount_and_amount_then_next(discount_raw: str, amount_raw: str) -> bool:
+        target_discount = _normalize_discount_target(discount_raw)
+        expected_amount_digits = _normalize_amount_digits(amount_raw)
+
+        if not target_discount:
+            return _abort(f"전자서명 중단: 모달 할인 추출 실패 / 고객={job['name']} / 원본할인={discount_raw}")
+
+        if not expected_amount_digits:
+            return _abort(f"전자서명 중단: 모달 금액 추출 실패 / 고객={job['name']} / 원본금액={amount_raw}")
+
+        if not _wait_discount_page_ready(timeout_sec=12.0):
+            return _abort(f"전자서명 중단: 할인정보 입력 화면 준비 실패 / 고객={job['name']}")
+
+        found_discount = False
+        total_ok = False
+
+        for step in range(8):
+            if is_unexpected_digital_sales_home(d):
+                return _abort(f"전자서명 중단: 할인정보 입력 단계 홈이탈 / 고객={job['name']}")
+
+            if not found_discount and _discount_page_has_target(target_discount):
+                found_discount = True
+                print(f"✅ [ready_sign] 할인 일치 확인: {target_discount}")
+
+            if _verify_total_amount_row(expected_amount_digits):
+                total_ok = True
+
+            if found_discount and total_ok:
+                if not d(text="다음").exists:
+                    return _abort(f"전자서명 중단: 할인정보 입력 페이지 다음 버튼 미검출 / 고객={job['name']}")
+
+                ok_click = click_text_center(d, "다음", 0.90, 0.99)
+                if not ok_click:
+                    return _abort(f"전자서명 중단: 할인정보 입력 페이지 다음 버튼 클릭 실패 / 고객={job['name']}")
+
+                time.sleep(2.0)
+                print(f"✅ [ready_sign] 할인/총금액 검증 완료 후 다음 클릭: {job['name']}")
+                return True
+
+            if step < 7:
+                print(f"ℹ️ [ready_sign] 할인정보 하단 검증 스크롤 {step + 1}/7")
+                _scroll_discount_down_once()
+
+        if not found_discount:
+            return _abort(
+                f"전자서명 중단: 할인 불일치 / 고객={job['name']} / 모달할인={discount_raw} / 목표={target_discount}"
+            )
+
+        return _abort(
+            f"전자서명 중단: 총 금액 또는 수납0원 불일치 / 고객={job['name']} / 모달금액={amount_raw}"
+        )
+
+    def _wait_payment_info_ready(timeout_sec: float = 12.0) -> bool:
+        end_at = time.time() + timeout_sec
+        stable_ok_count = 0
+
+        while time.time() < end_at:
+            try:
+                if is_unexpected_digital_sales_home(d):
+                    return False
+
+                has_title = d(text="결제정보 선택").exists or d(textContains="결제정보 선택").exists
+                has_next = d(text="다음").exists
+                has_method = (
+                    d(text="정기결제수단").exists
+                    or d(text="정기결제 수단").exists
+                    or d(text="정기결제 수단 선택").exists
+                    or d(textContains="정기결제").exists
+                )
+
+                if has_title and has_next and has_method:
+                    stable_ok_count += 1
+                    if stable_ok_count >= 2:
+                        print("✅ [ready_sign] 결제정보 선택 화면 준비 완료")
+                        time.sleep(0.5)
+                        return True
+                else:
+                    stable_ok_count = 0
+            except Exception:
+                stable_ok_count = 0
+
+            time.sleep(0.4)
+
+        print("❌ [ready_sign] 결제정보 선택 화면 준비 실패")
+        return False
+
+    def _click_payment_method_selector() -> bool:
+        try:
+            if d(text="정기결제 수단 선택").exists:
+                ok = click_text_center(d, "정기결제 수단 선택", 0.20, 0.60)
+                time.sleep(1.5)
+                return ok
+        except Exception:
+            pass
+
+        label_obj = None
+
+        try:
+            if d(text="정기결제수단").exists:
+                label_obj = d(text="정기결제수단")
+            elif d(text="정기결제 수단").exists:
+                label_obj = d(text="정기결제 수단")
+            elif d(textContains="정기결제").exists:
+                label_obj = d(textContains="정기결제")
+        except Exception:
+            label_obj = None
+
+        if label_obj is not None:
+            try:
+                w, h = d.window_size()
+                b = label_obj.info.get("bounds", {})
+                bottom = int(b.get("bottom", 0))
+                field_y = min(h - 20, bottom + max(55, int(h * 0.03)))
+
+                points = [
+                    (int(w * 0.50), field_y),
+                    (int(w * 0.82), field_y),
+                    (int(w * 0.65), field_y),
+                ]
+
+                for x, y in points:
+                    d.click(x, y)
+                    time.sleep(1.5)
+                    return True
+            except Exception:
+                pass
+
+        return False
+
+    def _wait_payment_add_sheet_and_click_add(timeout_sec: float = 6.0) -> bool:
+        end_at = time.time() + timeout_sec
+
+        while time.time() < end_at:
+            if is_unexpected_digital_sales_home(d):
+                return False
+
+            has_sheet = False
+            try:
+                has_sheet = (
+                    d(text="결제정보").exists
+                    or d(textContains="등록된 결제 수단").exists
+                    or d(textContains="결제 수단을 추가").exists
+                )
+            except Exception:
+                has_sheet = False
+
+            if has_sheet:
+                try:
+                    if d(text="추가").exists:
+                        d(text="추가").click()
+                        time.sleep(2.0)
+                        print(f"✅ [ready_sign] 결제수단 추가 버튼 클릭 완료: {job['name']}")
+                        return True
+                except Exception:
+                    pass
+
+                try:
+                    if d(textContains="추가").exists:
+                        d(textContains="추가").click()
+                        time.sleep(2.0)
+                        print(f"✅ [ready_sign] 결제수단 추가 버튼 클릭 완료: {job['name']}")
+                        return True
+                except Exception:
+                    pass
+
+            time.sleep(0.25)
+
+        return False
+
+    def _open_payment_method_and_click_add() -> bool:
+        if not _wait_payment_info_ready(timeout_sec=12.0):
+            return _abort(f"전자서명 중단: 결제정보 선택 화면 진입 실패 / 고객={job['name']}")
+
+        for attempt in range(3):
+            print(f"🔎 [ready_sign] 정기결제 수단 선택 열기 시도 {attempt + 1}/3")
+
+            ok_click = _click_payment_method_selector()
+            if not ok_click:
+                time.sleep(1.0)
+
+            if _wait_payment_add_sheet_and_click_add(timeout_sec=6.0):
+                print(f"✅ [ready_sign] 결제수단 추가 팝업 처리 완료: {job['name']}")
+                return True
+
+            time.sleep(1.0)
+
+        return _abort(f"전자서명 중단: 결제수단 추가 팝업 또는 추가 버튼 미검출 / 고객={job['name']}")
 
     for attempt in range(2):
         if is_unexpected_digital_sales_home(d):
@@ -2017,6 +2414,8 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
         color_raw = (job.get("color_raw") or "").strip()
         manage_raw = (job.get("manage_raw") or "").strip()
         contract_raw = (job.get("contract_raw") or "").strip()
+        discount_raw = (job.get("discount_raw") or "").strip()
+        amount_raw = (job.get("amount_raw") or "").strip()
 
         if not search_model:
             return _abort(f"전자서명 중단: 모달 모델명 추출 실패 / 고객={job['name']}")
@@ -2029,6 +2428,12 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
 
         if not contract_raw:
             return _abort(f"전자서명 중단: 모달 약정 추출 실패 / 고객={job['name']} / 모델={search_model}")
+
+        if not discount_raw:
+            return _abort(f"전자서명 중단: 모달 할인 추출 실패 / 고객={job['name']} / 모델={search_model}")
+
+        if not amount_raw:
+            return _abort(f"전자서명 중단: 모달 금액 추출 실패 / 고객={job['name']} / 모델={search_model}")
 
         if not d(text="주문 이어서 하기").exists:
             return _abort(f"전자서명 중단: 주문 이어서 하기 버튼 미검출 / 고객={job['name']}")
@@ -2060,15 +2465,21 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
         if not _select_contract_period(contract_raw):
             return False
 
-        if not _click_add_product():
+        if not _click_add_product_and_go_discount():
+            return False
+
+        if not _verify_discount_and_amount_then_next(discount_raw, amount_raw):
+            return False
+
+        if not _open_payment_method_and_click_add():
             return False
 
         SIGN_IN_PROGRESS = True
         sign_started.add(job["phone11"])
         notify(
-            f"전자서명 옵션선택 완료: {job['name']} / {job['phone11']} / 모델={search_model} / 색상={color_raw} / 관리={manage_raw} / 약정={contract_raw}"
+            f"전자서명 할인/결제수단추가 단계 완료: {job['name']} / {job['phone11']} / 모델={search_model} / 색상={color_raw} / 관리={manage_raw} / 약정={contract_raw} / 할인={discount_raw} / 금액={amount_raw}"
         )
-        print(f"✅ [ready_sign] 상품검색/색상/렌탈/관리/약정/상품담기 완료: {job['name']}")
+        print(f"✅ [ready_sign] 상품검색/색상/렌탈/관리/약정/할인검증/결제수단추가 완료: {job['name']}")
         return True
 
     return False
@@ -2374,6 +2785,8 @@ while True:
         address_detail = data.get("address_detail", "")
         manage_raw = data.get("manage_raw", "")
         contract_raw = data.get("contract_raw", "")
+        discount_raw = data.get("discount_raw", "")
+        amount_raw = data.get("amount_raw", "")
 
         if not phone11:
             print("❌ 전화번호 추출 실패 → 건너뜀")
@@ -2401,6 +2814,8 @@ while True:
         print("상세주소:", address_detail)
         print("관리:", manage_raw)
         print("약정:", contract_raw)
+        print("할인:", discount_raw)
+        print("금액:", amount_raw)
         print("-" * 40)
 
         auth_q.put({
@@ -2417,6 +2832,8 @@ while True:
             "address_detail": address_detail,
             "manage_raw": manage_raw,
             "contract_raw": contract_raw,
+            "discount_raw": discount_raw,
+            "amount_raw": amount_raw,
             "_retry": 0,
         })
 
