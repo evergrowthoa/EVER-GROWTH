@@ -225,8 +225,19 @@ def extract_fields_from_modal(modal):
     product_name = find_input_near_label(modal, ["상품명", "제품명", "품목"])
     model_name = find_input_near_label(modal, ["모델명", "모델코드", "상품코드", "모델", "제품모델", "상품모델"])
     color_raw = find_input_near_label(modal, ["색상", "컬러", "색깔", "color", "Color"])
-    address = find_input_near_label(modal, ["설치주소", "설치 주소", "주소", "기본주소", "도로명주소"])
+
+    address_basic = find_input_near_label(
+        modal,
+        ["기본주소", "기본 주소", "설치주소", "설치 주소", "도로명주소", "도로명 주소"]
+    )
+    if not address_basic:
+        address_basic = find_input_near_label(modal, ["주소"])
+
     address_detail = find_input_near_label(modal, ["상세주소", "상세 주소", "나머지주소"])
+
+    if address_basic and address_detail and address_basic == address_detail:
+        address_basic = ""
+
     manage_raw = find_input_near_label(modal, ["관리", "관리유형", "관리 유형", "관리방식", "관리 방식", "방문주기", "관리주기", "관리형태", "방문관리"])
     contract_raw = find_input_near_label(modal, ["약정", "약정기간", "의무사용기간", "의무 사용기간", "계약기간", "사용기간"])
 
@@ -242,7 +253,8 @@ def extract_fields_from_modal(modal):
         "product_name": (product_name or "").strip(),
         "model_name": (model_name or "").strip(),
         "color_raw": (color_raw or "").strip(),
-        "address": (address or "").strip(),
+        "address": (address_basic or "").strip(),
+        "address_basic": (address_basic or "").strip(),
         "address_detail": (address_detail or "").strip(),
         "manage_raw": (manage_raw or "").strip(),
         "contract_raw": (contract_raw or "").strip(),
@@ -1523,7 +1535,8 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
             except Exception:
                 return False
 
-        time.sleep(2.0)
+        print("⏳ [ready_sign] 제품검색 결과 안정화 대기 3.5초")
+        time.sleep(3.5)
         return True
 
     def _collect_product_candidates(model_query: str):
@@ -1591,6 +1604,66 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
             print("❌ [ready_sign] 상품후보 수집 예외:", e)
             return []
 
+    def _is_search_return_popup_open() -> bool:
+        popup_fragments = [
+            "상품 검색 화면으로 이동",
+            "상품검색 화면으로 이동",
+            "이동하시겠습니까",
+        ]
+
+        for frag in popup_fragments:
+            try:
+                if d(text=frag).exists:
+                    return True
+            except Exception:
+                pass
+
+            try:
+                if d(textContains=frag).exists:
+                    return True
+            except Exception:
+                pass
+
+        return False
+
+    def _dismiss_search_return_popup_if_open() -> bool:
+        if not _is_search_return_popup_open():
+            return False
+
+        print("⚠️ [ready_sign] 상품검색 복귀 팝업 감지 → [취소] 클릭 후 계속 진행")
+
+        clicked = False
+
+        try:
+            if d(text="취소").exists:
+                d(text="취소").click()
+                clicked = True
+        except Exception:
+            clicked = False
+
+        if not clicked:
+            try:
+                if d(textContains="취소").exists:
+                    d(textContains="취소").click()
+                    clicked = True
+            except Exception:
+                clicked = False
+
+        if not clicked:
+            try:
+                clicked = click_text_center(d, "취소", 0.45, 0.98)
+            except Exception:
+                clicked = False
+
+        time.sleep(2.0)
+
+        if _is_search_return_popup_open():
+            print("⚠️ [ready_sign] 팝업이 아직 남아있음")
+        else:
+            print("✅ [ready_sign] 팝업 취소 처리 완료")
+
+        return clicked
+
     def _choose_and_click_product(model_query: str, color_raw: str) -> bool:
         desired_color = _normalize_color_keyword(color_raw)
         if not desired_color:
@@ -1624,64 +1697,19 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
 
         print(f"✅ [ready_sign] 최종 상품 선택: {chosen['text']}")
         d.click(cx, cy)
-        time.sleep(2.2)
+
+        print("⏳ [ready_sign] 색상 선택 후 주문접수/상품선택 전환 대기 8.0초")
+        time.sleep(8.0)
+
+        if _is_search_return_popup_open():
+            _dismiss_search_return_popup_if_open()
+
+        if not _wait_product_option_ready(timeout_sec=12.0):
+            return _abort(f"전자서명 중단: 상품선택 화면 준비 실패 / 고객={job['name']} / 모델={model_query}")
+
         return True
 
-    def _is_search_return_popup_open() -> bool:
-        popup_candidates = [
-            "상품 검색 화면으로 이동하시겠습니까",
-            "상품 검색 화면으로 이동하시겠습니까?",
-            "이동하시겠습니까",
-        ]
-
-        for t in popup_candidates:
-            try:
-                if d(text=t).exists:
-                    return True
-            except Exception:
-                pass
-
-            try:
-                if d(textContains=t).exists:
-                    return True
-            except Exception:
-                pass
-
-        return False
-
-    def _dismiss_search_return_popup_if_open() -> bool:
-        if not _is_search_return_popup_open():
-            return False
-
-        print("⚠️ [ready_sign] 상품검색 복귀 팝업 감지 → 취소 후 재확인")
-
-        clicked = False
-
-        try:
-            if d(text="취소").exists:
-                d(text="취소").click()
-                clicked = True
-            elif d(textContains="취소").exists:
-                d(textContains="취소").click()
-                clicked = True
-            else:
-                clicked = click_text_center(d, "취소", 0.45, 0.98)
-        except Exception:
-            clicked = False
-
-        time.sleep(2.0)
-
-        try:
-            if _is_search_return_popup_open():
-                print("⚠️ [ready_sign] 상품검색 복귀 팝업이 아직 남아있음")
-            else:
-                print("✅ [ready_sign] 상품검색 복귀 팝업 해제 완료")
-        except Exception:
-            pass
-
-        return clicked
-
-    def _wait_product_option_ready(timeout_sec: float = 10.0) -> bool:
+    def _wait_product_option_ready(timeout_sec: float = 12.0) -> bool:
         end_at = time.time() + timeout_sec
         stable_ok_count = 0
 
@@ -1693,6 +1721,7 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
                 if _is_search_return_popup_open():
                     _dismiss_search_return_popup_if_open()
                     stable_ok_count = 0
+                    time.sleep(0.5)
                     continue
 
                 has_title = d(text="상품선택").exists or d(text="주문접수").exists
@@ -1702,27 +1731,26 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
                     stable_ok_count += 1
                     if stable_ok_count >= 2:
                         print("✅ [ready_sign] 판매구분 화면 준비 완료")
-                        time.sleep(0.4)
+                        time.sleep(0.5)
                         return True
-                    time.sleep(0.35)
-                    continue
+                else:
+                    stable_ok_count = 0
 
-                stable_ok_count = 0
             except Exception:
                 stable_ok_count = 0
 
-            time.sleep(0.30)
+            time.sleep(0.5)
 
         print("❌ [ready_sign] 판매구분 화면 준비 실패")
         return False
 
     def _select_rental_option() -> bool:
-        if not _wait_product_option_ready(timeout_sec=10.0):
+        if not _wait_product_option_ready(timeout_sec=12.0):
             return _abort(f"전자서명 중단: 판매구분 화면 진입 실패 / 고객={job['name']}")
 
         section_open_attempted = False
 
-        for attempt in range(4):
+        for attempt in range(6):
             if _is_search_return_popup_open():
                 _dismiss_search_return_popup_if_open()
 
@@ -1749,14 +1777,18 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
                 return True
 
             if (not section_open_attempted) and d(text="판매구분").exists:
-                print(f"ℹ️ [ready_sign] 판매구분 옵션 재확인/펼치기 시도 {attempt + 1}/4")
+                print(f"ℹ️ [ready_sign] 판매구분 옵션 재확인/펼치기 시도 {attempt + 1}/6")
                 click_text_center(d, "판매구분", 0.35, 0.90)
                 time.sleep(2.0)
+
+                if _is_search_return_popup_open():
+                    _dismiss_search_return_popup_if_open()
+
                 section_open_attempted = True
                 continue
 
-            print(f"⚠️ [ready_sign] 판매구분 옵션 재조회 {attempt + 1}/4")
-            time.sleep(1.0)
+            print(f"⚠️ [ready_sign] 판매구분 옵션 재조회 {attempt + 1}/6")
+            time.sleep(2.0)
 
         return _abort(f"전자서명 중단: 판매구분 렌탈/일시불 옵션 미검출 / 고객={job['name']}")
 
@@ -2338,6 +2370,7 @@ while True:
         model_name = data.get("model_name", "")
         color_raw = data.get("color_raw", "")
         address = data.get("address", "")
+        address_basic = data.get("address_basic", "") or address
         address_detail = data.get("address_detail", "")
         manage_raw = data.get("manage_raw", "")
         contract_raw = data.get("contract_raw", "")
@@ -2364,7 +2397,7 @@ while True:
         print("상품명:", product_name)
         print("모델명:", model_name)
         print("색상:", color_raw)
-        print("주소:", address)
+        print("기본주소:", address_basic)
         print("상세주소:", address_detail)
         print("관리:", manage_raw)
         print("약정:", contract_raw)
@@ -2379,7 +2412,8 @@ while True:
             "product_name": product_name,
             "model_name": model_name,
             "color_raw": color_raw,
-            "address": address,
+            "address": address_basic,
+            "address_basic": address_basic,
             "address_detail": address_detail,
             "manage_raw": manage_raw,
             "contract_raw": contract_raw,
