@@ -929,25 +929,61 @@ def trigger_search(d, edit_obj):
     return True
 
 def get_first_status_badge_in_results(d):
+    """
+    ✅ 검색 결과 리스트에서 가장 위에 보이는 상태 배지 1개를 반환
+    중요:
+    - 기존 0.35*h 제한은 너무 아래쪽만 봐서 실제 첫 결과를 놓침
+    - 상단 헤더/검색영역 아래부터만 보되, 첫 결과 영역은 포함해야 함
+    """
     status_texts = ["인증완료", "인증입력", "서명입력", "주문확정", "주문삭제", "주문불가"]
+
     try:
         w, h = d.window_size()
         found = []
+
         for st in status_texts:
-            for o in d(text=st).all():
+            objs = d(text=st)
+            try:
+                cnt = objs.count
+            except Exception:
+                cnt = 0
+
+            for i in range(cnt):
                 try:
-                    b = o.info.get("bounds", {})
+                    o = objs[i]
+                    info = o.info or {}
+                    b = info.get("bounds", {})
+
                     top = int(b.get("top", 0))
-                    if top < int(h * 0.35):
+                    bottom = int(b.get("bottom", 0))
+                    left = int(b.get("left", 0))
+                    right = int(b.get("right", 0))
+
+                    # 너무 위(탭/검색영역)는 제외하되,
+                    # 첫 번째 결과 행은 포함되도록 기준을 낮춤
+                    if top < int(h * 0.20):
                         continue
-                    found.append((top, st, o))
+
+                    # 너무 아래/이상한 영역 제외
+                    if bottom > int(h * 0.95):
+                        continue
+
+                    found.append((top, left, st, o, (left, top, right, bottom)))
                 except Exception:
                     continue
+
         if not found:
             return ("", None)
-        found.sort(key=lambda x: x[0])
-        return (found[0][1], found[0][2])
-    except Exception:
+
+        # 가장 위에 있는 결과 우선, 같은 줄이면 왼쪽 우선
+        found.sort(key=lambda x: (x[0], x[1]))
+        st = found[0][2]
+        obj = found[0][3]
+        print(f"✅ [get_first_status_badge_in_results] 첫 상태 배지 탐지: {st} / bounds={found[0][4]}")
+        return (st, obj)
+
+    except Exception as e:
+        print("❌ [get_first_status_badge_in_results] 예외:", e)
         return ("", None)
 
 def open_detail_by_status_badge(d, badge_obj) -> bool:
@@ -1172,9 +1208,13 @@ def check_one_job_status_by_search(d, job: dict) -> str:
 
 def try_open_ready_sign_detail(d, job: dict) -> bool:
     """
-    ✅ 인증완료 상세 진입 도중 홈화면 이탈이 생기면
-    복구 후 같은 고객으로 다시 검색
+    ✅ 인증완료 상세 진입
+    - 검색 결과에서 '인증완료' 핑크 배지 클릭
+    - 상세 고객명 + 연락처가 웹 저장값과 완전 일치해야만 통과
+    - 일치 시 '주문 이어서 하기'를 눌러 전자서명 단계로 진입
     """
+    global SIGN_IN_PROGRESS
+
     for attempt in range(2):
         if is_unexpected_digital_sales_home(d):
             if not recover_from_unexpected_home(d, f"상세진입 시작 직전 {job['name']}"):
@@ -1187,6 +1227,21 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
         if is_unexpected_digital_sales_home(d):
             if attempt == 0 and recover_from_unexpected_home(d, f"상세진입 주문현황 진입 직후 {job['name']}"):
                 continue
+            return False
+
+        ready_state = wait_until_order_status_ready(d, timeout_sec=8.0)
+        if ready_state == "home":
+            if attempt == 0 and recover_from_unexpected_home(d, f"상세진입 로딩중 홈이탈 {job['name']}"):
+                time.sleep(0.8)
+                continue
+            return False
+
+        if ready_state == "timeout":
+            if attempt == 0:
+                ok_refresh = refresh_order_status_by_reenter(d)
+                if ok_refresh:
+                    time.sleep(1.0)
+                    continue
             return False
 
         if not ensure_general_tab(d, force_click=True):
@@ -1213,20 +1268,25 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
                 continue
             return False
 
+        time.sleep(0.45)
         trigger_search(d, edit)
+        time.sleep(1.20)
 
         if is_unexpected_digital_sales_home(d):
             if attempt == 0 and recover_from_unexpected_home(d, f"상세진입 검색 실행 중 {job['name']}"):
                 continue
             return False
 
+        time.sleep(0.80)
         st, badge = get_first_status_badge_in_results(d)
         print(f"🧾 [ready_sign] 검색 결과 상태: {st or 'NONE'}")
 
         if st != "인증완료" or badge is None:
             return False
 
+        print(f"✅ [ready_sign] 인증완료 배지 클릭 시도: {job['name']}")
         open_detail_by_status_badge(d, badge)
+        time.sleep(0.90)
 
         if is_unexpected_digital_sales_home(d):
             if attempt == 0 and recover_from_unexpected_home(d, f"상세진입 상세열기 중 {job['name']}"):
@@ -1235,14 +1295,25 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
 
         if match_detail_by_name_phone(d, job["name"], job["phone11"]):
             print("✅ [ready_sign] 상세 고객명/전화번호 매칭 성공")
-            return True
+
+            if d(text="주문 이어서 하기").exists:
+                click_text_center(d, "주문 이어서 하기", 0.20, 0.80)
+                time.sleep(1.0)
+
+                SIGN_IN_PROGRESS = True
+                sign_started.add(job["phone11"])
+                notify(f"전자서명 단계 진입: {job['name']} / {job['phone11']}")
+                print(f"✅ [ready_sign] 주문 이어서 하기 클릭 완료: {job['name']}")
+                return True
+
+            print("❌ [ready_sign] 주문 이어서 하기 버튼을 찾지 못함")
+            return False
 
         print("❌ [ready_sign] 상세 고객명/전화번호 매칭 실패 → 주문현황으로 복귀")
         back_to_order_status(d)
         return False
 
     return False
-
 # ---------------------------
 # 인증발송
 # ---------------------------
@@ -1467,7 +1538,8 @@ def emulator_main_loop():
                 if st == "인증완료":
                     ok = try_open_ready_sign_detail(d, j)
                     if ok:
-                        notify(f"✅ 인증완료 확인(매칭 OK): {j['name']} / {j['phone11']}  → 전자서명 단계로 진행 가능")
+                        notify(f"✅ 인증완료 확인(매칭 OK): {j['name']} / {j['phone11']} → 주문 이어서 하기 진입")
+                    else:
                         back_to_order_status(d)
 
                 time.sleep(0.6)
