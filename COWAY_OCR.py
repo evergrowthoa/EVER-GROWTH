@@ -238,22 +238,11 @@ def enable_fast_ime(d):
 def type_into_edittext(d, edit_obj, text: str) -> bool:
     """
     ✅ 한글 입력 3단계(검증 포함)
-    1) set_text
-    2) fast IME send_keys
-    3) clipboard + (붙여넣기/붙여 넣기/Paste) 버튼 클릭
-
-    추가:
-    - 검색창은 가운데보다 '왼쪽 안쪽' 클릭이 더 안정적일 수 있음
-    - 포커스를 2회 확보
-    - 매 단계마다 실제 입력값 검증
+    변경:
+    - 클릭 횟수/속도 완화
+    - refind 횟수 줄임
+    - 로딩 중일 때는 입력 중단
     """
-    def _refind():
-        try:
-            fresh = find_search_edittext(d)
-            return fresh if fresh is not None else edit_obj
-        except Exception:
-            return edit_obj
-
     def _get_now(obj):
         try:
             return (obj.get_text() or "").strip()
@@ -264,8 +253,27 @@ def type_into_edittext(d, edit_obj, text: str) -> bool:
             except Exception:
                 return ""
 
+    def _is_loading_overlay():
+        loading_texts = [
+            "조회중입니다",
+            "잠시만 기다려주세요",
+            "조회중입니다.",
+            "잠시만 기다려주세요.",
+        ]
+        for t in loading_texts:
+            try:
+                if d(textContains=t).exists:
+                    return True
+            except Exception:
+                pass
+        return False
+
     try:
-        obj = _refind()
+        if _is_loading_overlay():
+            print("⏳ [type_into_edittext] 로딩중이라 입력 보류")
+            return False
+
+        obj = edit_obj
         b = obj.info.get("bounds", {})
         left = int(b.get("left", 0))
         top = int(b.get("top", 0))
@@ -273,32 +281,27 @@ def type_into_edittext(d, edit_obj, text: str) -> bool:
         bottom = int(b.get("bottom", 0))
 
         cy = (top + bottom) // 2
-
-        # ✅ 가운데 클릭 대신 왼쪽 안쪽 클릭
         focus_x = left + max(20, (right - left) // 6)
 
-        # 1차 포커스
+        # ✅ 클릭 1회만 하고 충분히 대기
         d.click(focus_x, cy)
-        time.sleep(0.2)
+        time.sleep(0.35)
 
-        # 2차 포커스
-        d.click(focus_x, cy)
-        time.sleep(0.2)
+        if _is_loading_overlay():
+            print("⏳ [type_into_edittext] 포커스 직후 로딩감지")
+            return False
 
-        obj = _refind()
-
-        # 혹시 이전 값이 남아 있으면 먼저 비우기 시도
+        # 이전 값 비우기
         try:
             obj.set_text("")
-            time.sleep(0.15)
+            time.sleep(0.25)
         except Exception:
             pass
 
         # 1) set_text
         try:
-            obj = _refind()
             obj.set_text(text)
-            time.sleep(0.35)
+            time.sleep(0.50)
             got = _get_now(obj)
             print(f"🔍 [type_into_edittext] set_text 결과: '{got}'")
             if got and (got == text or text in got):
@@ -306,18 +309,21 @@ def type_into_edittext(d, edit_obj, text: str) -> bool:
         except Exception as e:
             print("⚠️ [type_into_edittext] set_text 실패:", e)
 
-        # 2) fast IME + send_keys
+        if _is_loading_overlay():
+            print("⏳ [type_into_edittext] set_text 후 로딩감지")
+            return False
+
+        # 2) send_keys
         try:
             d.set_fastinput_ime(True)
         except Exception:
             pass
 
         try:
-            obj = _refind()
             d.click(focus_x, cy)
-            time.sleep(0.15)
+            time.sleep(0.30)
             d.send_keys(text, clear=True)
-            time.sleep(0.35)
+            time.sleep(0.55)
             got = _get_now(obj)
             print(f"🔍 [type_into_edittext] send_keys 결과: '{got}'")
             if got and (got == text or text in got):
@@ -325,14 +331,17 @@ def type_into_edittext(d, edit_obj, text: str) -> bool:
         except Exception as e:
             print("⚠️ [type_into_edittext] send_keys 실패:", e)
 
+        if _is_loading_overlay():
+            print("⏳ [type_into_edittext] send_keys 후 로딩감지")
+            return False
+
         # 3) clipboard paste
         try:
-            obj = _refind()
             d.set_clipboard(text)
-            time.sleep(0.15)
+            time.sleep(0.20)
 
             d.long_click(focus_x, cy, 0.7)
-            time.sleep(0.45)
+            time.sleep(0.55)
 
             paste_candidates = ["붙여넣기", "붙여 넣기", "Paste", "PASTE"]
             clicked = False
@@ -341,18 +350,18 @@ def type_into_edittext(d, edit_obj, text: str) -> bool:
                 if d(text=t).exists:
                     d(text=t).click()
                     clicked = True
-                    time.sleep(0.35)
+                    time.sleep(0.50)
                     break
 
             if not clicked:
                 if d(textContains="붙여").exists:
                     d(textContains="붙여").click()
                     clicked = True
-                    time.sleep(0.35)
+                    time.sleep(0.50)
                 elif d(textContains="Paste").exists:
                     d(textContains="Paste").click()
                     clicked = True
-                    time.sleep(0.35)
+                    time.sleep(0.50)
 
             got = _get_now(obj)
             print(f"🔍 [type_into_edittext] clipboard 결과: '{got}' / clicked={clicked}")
@@ -971,20 +980,66 @@ def back_to_order_status(d) -> bool:
         time.sleep(0.4)
     return d(text="주문현황").exists
 
-def wait_until_order_status_ready(d, timeout_sec: float = 3.5) -> bool:
+def wait_until_order_status_ready(d, timeout_sec: float = 8.0) -> str:
     """
-    ✅ 주문현황 진입 직후 로딩이 끝날 때까지 잠깐 대기
-    준비 완료 기준:
-    - 주문현황 타이틀 존재
-    - 검색용 EditText가 2개 이상 잡힘
-    - 넓은 검색창(EditText)이 실제로 선택 가능
+    리턴값:
+    - "ready": 주문현황 검색 가능 상태
+    - "home": 로딩 중/대기 중 홈화면 이탈 감지
+    - "timeout": 주문현황에 머물렀지만 로딩이 너무 오래 감
     """
+    def _is_loading_overlay():
+        loading_texts = [
+            "조회중입니다",
+            "잠시만 기다려주세요",
+            "조회중입니다.",
+            "잠시만 기다려주세요.",
+        ]
+
+        for t in loading_texts:
+            try:
+                if d(textContains=t).exists:
+                    return True
+            except Exception:
+                pass
+
+        try:
+            pbs = d(className="android.widget.ProgressBar")
+            if pbs.count > 0:
+                for i in range(pbs.count):
+                    try:
+                        info = pbs[i].info or {}
+                        b = info.get("bounds", {})
+                        top = int(b.get("top", 0))
+                        bottom = int(b.get("bottom", 0))
+                        cy = (top + bottom) // 2
+                        h = d.window_size()[1]
+                        if int(h * 0.25) <= cy <= int(h * 0.80):
+                            return True
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+        return False
+
     end_at = time.time() + timeout_sec
+    stable_ok_count = 0
 
     while time.time() < end_at:
         try:
+            if is_unexpected_digital_sales_home(d):
+                print("⚠️ [wait_until_order_status_ready] 로딩 중 홈화면 이탈 감지")
+                return "home"
+
             if not d(text="주문현황").exists:
-                time.sleep(0.15)
+                stable_ok_count = 0
+                time.sleep(0.25)
+                continue
+
+            if _is_loading_overlay():
+                print("⏳ [wait_until_order_status_ready] 주문현황 로딩중...")
+                stable_ok_count = 0
+                time.sleep(0.40)
                 continue
 
             edits = d(className="android.widget.EditText")
@@ -993,25 +1048,34 @@ def wait_until_order_status_ready(d, timeout_sec: float = 3.5) -> bool:
             if cnt >= 2:
                 edit = find_search_edittext(d)
                 if edit is not None:
-                    print("✅ [wait_until_order_status_ready] 주문현황 로딩 완료")
-                    return True
-        except Exception:
-            pass
+                    stable_ok_count += 1
+                    if stable_ok_count >= 3:
+                        print("✅ [wait_until_order_status_ready] 주문현황 로딩 완료")
+                        time.sleep(0.45)
+                        return "ready"
+                    time.sleep(0.25)
+                    continue
 
-        time.sleep(0.15)
+            stable_ok_count = 0
+        except Exception:
+            stable_ok_count = 0
+
+        time.sleep(0.25)
+
+    if is_unexpected_digital_sales_home(d):
+        print("⚠️ [wait_until_order_status_ready] timeout 직전 홈화면 이탈 감지")
+        return "home"
 
     print("⚠️ [wait_until_order_status_ready] 주문현황 로딩 대기 timeout")
-    return False
+    return "timeout"
 
 def check_one_job_status_by_search(d, job: dict) -> str:
     """
-    ✅ 리스트 검색 중 홈화면 이탈이 생기면
-    모바일 주문 홈 → 주문현황 재진입 → 같은 고객 검색 재시도
-
-    추가:
-    - 주문현황 진입 직후 로딩이 끝날 때까지 잠깐 대기
+    ✅ 리스트 검색 중
+    - 홈화면 이탈이면 복구 후 재진입
+    - 로딩 timeout이면 재진입 갱신 후 같은 고객 다시 검색
     """
-    for attempt in range(2):
+    for attempt in range(3):
         if is_unexpected_digital_sales_home(d):
             if not recover_from_unexpected_home(d, f"상태확인 시작 직전 {job['name']}"):
                 return ""
@@ -1021,13 +1085,35 @@ def check_one_job_status_by_search(d, job: dict) -> str:
             return ""
 
         if is_unexpected_digital_sales_home(d):
-            if attempt == 0 and recover_from_unexpected_home(d, f"주문현황 진입 직후 {job['name']}"):
+            if attempt < 2 and recover_from_unexpected_home(d, f"주문현황 진입 직후 {job['name']}"):
                 continue
             return ""
 
-        if not wait_until_order_status_ready(d, timeout_sec=3.5):
-            print("❌ [status_check] 주문현황 로딩 완료 대기 실패")
+        ready_state = wait_until_order_status_ready(d, timeout_sec=8.0)
+
+        if ready_state == "home":
+            print(f"⚠️ [status_check] 로딩 중 홈화면 이탈 → 복구 후 재시도: {job['name']}")
+            notify(f"로딩 중 홈화면 이탈 감지 → 재시도: {job['name']}")
+            if attempt < 2 and recover_from_unexpected_home(d, f"주문현황 로딩중 홈이탈 {job['name']}"):
+                time.sleep(0.8)
+                continue
             return ""
+
+        if ready_state == "timeout":
+            print(f"⚠️ [status_check] 주문현황 로딩 timeout → 재진입 후 재시도: {job['name']}")
+            notify(f"주문현황 로딩 timeout → 재진입 재시도: {job['name']}")
+            if attempt < 2:
+                ok_refresh = refresh_order_status_by_reenter(d)
+                if ok_refresh:
+                    time.sleep(1.0)
+                    continue
+            return ""
+
+        if ready_state != "ready":
+            print("❌ [status_check] 주문현황 준비상태 판정 실패")
+            return ""
+
+        time.sleep(0.50)
 
         if not ensure_general_tab(d, force_click=True):
             print("❌ [status_check] 일반 탭 복구 실패 → 이번 검색 중단")
@@ -1041,7 +1127,9 @@ def check_one_job_status_by_search(d, job: dict) -> str:
             print("❌ [status_check] 일반 탭 검증 예외 → 이번 검색 중단")
             return ""
 
+        time.sleep(0.30)
         dismiss_search_mode_dropdown_if_open(d)
+        time.sleep(0.25)
 
         edit = find_search_edittext(d)
         if edit is None:
@@ -1057,17 +1145,24 @@ def check_one_job_status_by_search(d, job: dict) -> str:
             return ""
 
         if is_unexpected_digital_sales_home(d):
-            if attempt == 0 and recover_from_unexpected_home(d, f"검색어 입력 중 {job['name']}"):
+            if attempt < 2 and recover_from_unexpected_home(d, f"검색어 입력 중 {job['name']}"):
+                time.sleep(0.8)
                 continue
             return ""
 
+        time.sleep(0.45)
         trigger_search(d, edit)
-        time.sleep(0.6)
+        time.sleep(1.30)
 
         if is_unexpected_digital_sales_home(d):
-            if attempt == 0 and recover_from_unexpected_home(d, f"검색 실행 중 {job['name']}"):
+            print(f"⚠️ [status_check] 검색 실행 후 홈화면 이탈 → 재시도: {job['name']}")
+            notify(f"검색 실행 후 홈화면 이탈 → 재시도: {job['name']}")
+            if attempt < 2 and recover_from_unexpected_home(d, f"검색 실행 중 {job['name']}"):
+                time.sleep(0.8)
                 continue
             return ""
+
+        time.sleep(0.80)
 
         st, badge = get_first_status_badge_in_results(d)
         print(f"🧾 [status_check] 검색 결과 상태: {st or 'NONE'}")
