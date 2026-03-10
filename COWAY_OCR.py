@@ -1718,18 +1718,86 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
         print(f"✅ [ready_sign] 최종 상품 선택: {chosen['text']}")
         d.click(cx, cy)
 
-        print("⏳ [ready_sign] 색상 선택 후 주문접수/상품선택 전환 대기 10.0초")
-        time.sleep(10.0)
+        print("⏳ [ready_sign] 색상 선택 후 주문접수/상품선택 전환 대기 12.0초")
+        time.sleep(12.0)
 
         if _is_search_return_popup_open():
             _dismiss_search_return_popup_if_open()
 
-        if not _wait_product_option_ready(timeout_sec=12.0):
+        if not _wait_product_option_ready(timeout_sec=16.0):
             return _abort(f"전자서명 중단: 상품선택 화면 준비 실패 / 고객={job['name']} / 모델={model_query}")
 
         return True
 
-    def _wait_product_option_ready(timeout_sec: float = 12.0) -> bool:
+    def _has_sale_group_options_visible() -> bool:
+        has_rental = False
+        has_cash = False
+
+        try:
+            has_rental = d(text="렌탈").exists
+        except Exception:
+            has_rental = False
+
+        try:
+            has_cash = d(text="일시불").exists
+        except Exception:
+            has_cash = False
+
+        return has_rental and has_cash
+
+    def _click_sale_group_expand_arrow() -> bool:
+        label_obj = None
+
+        try:
+            if d(text="판매구분").exists:
+                label_obj = d(text="판매구분")
+            elif d(textContains="판매구분").exists:
+                label_obj = d(textContains="판매구분")
+        except Exception:
+            label_obj = None
+
+        if label_obj is None:
+            return False
+
+        try:
+            w, h = d.window_size()
+            b = label_obj.info.get("bounds", {})
+            top = int(b.get("top", 0))
+            bottom = int(b.get("bottom", 0))
+            cy = (top + bottom) // 2
+
+            candidate_points = [
+                (int(w * 0.95), cy),
+                (int(w * 0.92), cy),
+                (int(w * 0.89), cy),
+                (int(w * 0.85), cy),
+                (int(w * 0.80), cy),
+            ]
+
+            tried = set()
+            filtered_points = []
+            for x, y in candidate_points:
+                x = max(0, min(w - 10, int(x)))
+                y = max(0, min(h - 10, int(y)))
+                key = (x, y)
+                if key not in tried:
+                    filtered_points.append((x, y))
+                    tried.add(key)
+
+            for x, y in filtered_points:
+                d.click(x, y)
+                time.sleep(1.8)
+
+                if _has_sale_group_options_visible():
+                    print("✅ [ready_sign] 판매구분 옵션 펼치기 완료")
+                    return True
+
+            return False
+
+        except Exception:
+            return False
+
+    def _wait_product_option_ready(timeout_sec: float = 16.0) -> bool:
         end_at = time.time() + timeout_sec
         stable_ok_count = 0
 
@@ -1741,17 +1809,17 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
                 if _is_search_return_popup_open():
                     _dismiss_search_return_popup_if_open()
                     stable_ok_count = 0
-                    time.sleep(0.5)
+                    time.sleep(0.6)
                     continue
 
                 has_title = d(text="상품선택").exists or d(text="주문접수").exists
-                has_sale_group = d(text="판매구분").exists
+                has_sale_group = d(text="판매구분").exists or d(textContains="판매구분").exists
 
                 if has_title and has_sale_group:
                     stable_ok_count += 1
                     if stable_ok_count >= 2:
                         print("✅ [ready_sign] 판매구분 화면 준비 완료")
-                        time.sleep(0.5)
+                        time.sleep(0.8)
                         return True
                 else:
                     stable_ok_count = 0
@@ -1759,35 +1827,20 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
             except Exception:
                 stable_ok_count = 0
 
-            time.sleep(0.5)
+            time.sleep(0.6)
 
         print("❌ [ready_sign] 판매구분 화면 준비 실패")
         return False
 
     def _select_rental_option() -> bool:
-        if not _wait_product_option_ready(timeout_sec=12.0):
+        if not _wait_product_option_ready(timeout_sec=16.0):
             return _abort(f"전자서명 중단: 판매구분 화면 진입 실패 / 고객={job['name']}")
 
-        section_open_attempted = False
-
-        for attempt in range(6):
+        for attempt in range(8):
             if _is_search_return_popup_open():
                 _dismiss_search_return_popup_if_open()
 
-            has_rental = False
-            has_cash = False
-
-            try:
-                has_rental = d(text="렌탈").exists
-            except Exception:
-                has_rental = False
-
-            try:
-                has_cash = d(text="일시불").exists
-            except Exception:
-                has_cash = False
-
-            if has_rental and has_cash:
+            if _has_sale_group_options_visible():
                 ok_click = click_text_center(d, "렌탈", 0.35, 0.90)
                 if not ok_click:
                     return _abort(f"전자서명 중단: 렌탈 옵션 클릭 실패 / 고객={job['name']}")
@@ -1796,19 +1849,22 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
                 print(f"✅ [ready_sign] 렌탈 선택 완료: {job['name']}")
                 return True
 
-            if (not section_open_attempted) and d(text="판매구분").exists:
-                print(f"ℹ️ [ready_sign] 판매구분 옵션 재확인/펼치기 시도 {attempt + 1}/6")
-                click_text_center(d, "판매구분", 0.35, 0.90)
-                time.sleep(2.0)
+            print(f"ℹ️ [ready_sign] 판매구분 옵션 펼치기 시도 {attempt + 1}/8")
 
-                if _is_search_return_popup_open():
-                    _dismiss_search_return_popup_if_open()
+            expanded = _click_sale_group_expand_arrow()
+            if expanded:
+                time.sleep(1.2)
 
-                section_open_attempted = True
-                continue
+                if _has_sale_group_options_visible():
+                    ok_click = click_text_center(d, "렌탈", 0.35, 0.90)
+                    if not ok_click:
+                        return _abort(f"전자서명 중단: 렌탈 옵션 클릭 실패 / 고객={job['name']}")
 
-            print(f"⚠️ [ready_sign] 판매구분 옵션 재조회 {attempt + 1}/6")
-            time.sleep(2.0)
+                    time.sleep(2.0)
+                    print(f"✅ [ready_sign] 렌탈 선택 완료: {job['name']}")
+                    return True
+
+            time.sleep(1.5)
 
         return _abort(f"전자서명 중단: 판매구분 렌탈/일시불 옵션 미검출 / 고객={job['name']}")
 
@@ -3356,6 +3412,54 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
         print(f"✅ [ready_sign] 우편번호/기본주소 일치 결과 선택 완료: {best_item['text']}")
         return True
 
+    def _find_detail_address_edittext():
+        try:
+            w, h = d.window_size()
+            edits = d(className="android.widget.EditText")
+            cnt = edits.count
+
+            best = None
+            best_top = -1
+            best_width = 0
+
+            for i in range(cnt):
+                try:
+                    e = edits[i]
+                    info = e.info or {}
+                    b = info.get("bounds", {})
+                    left = int(b.get("left", 0))
+                    top = int(b.get("top", 0))
+                    right = int(b.get("right", 0))
+                    bottom = int(b.get("bottom", 0))
+                    width = right - left
+                    height = bottom - top
+
+                    if top < int(h * 0.20) or bottom > int(h * 0.82):
+                        continue
+
+                    if width < int(w * 0.45):
+                        continue
+
+                    if height < 50:
+                        continue
+
+                    text_now = _read_edit_obj_text(e)
+                    text_norm = re.sub(r"\s+", "", str(text_now or ""))
+
+                    if "충북" in text_norm or "청주시" in text_norm or "호미로" in text_norm:
+                        continue
+
+                    if top > best_top or (top == best_top and width > best_width):
+                        best = e
+                        best_top = top
+                        best_width = width
+                except Exception:
+                    continue
+
+            return best
+        except Exception:
+            return None
+
     def _wait_address_detail_ready(timeout_sec: float = 12.0) -> bool:
         end_at = time.time() + timeout_sec
         stable_ok_count = 0
@@ -3366,10 +3470,10 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
                     return False
 
                 has_title = d(text="주소입력").exists or d(textContains="주소입력").exists
-                has_detail = d(textContains="상세주소").exists or d(textContains="필수 입력").exists
                 has_submit = d(text="주소 입력").exists or d(textContains="주소 입력").exists
+                detail_edit = _find_detail_address_edittext()
 
-                if has_title and has_detail and has_submit:
+                if has_title and has_submit and detail_edit is not None:
                     stable_ok_count += 1
                     if stable_ok_count >= 2:
                         print("✅ [ready_sign] 주소 상세입력 화면 준비 완료")
@@ -3392,7 +3496,7 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
         if not _wait_address_detail_ready(timeout_sec=12.0):
             return False
 
-        edit = _find_lowest_widest_edittext(0.20, 0.80)
+        edit = _find_detail_address_edittext()
         if edit is None:
             return _abort(f"전자서명 중단: 상세주소 입력칸 미검출 / 고객={job['name']}")
 
@@ -3401,6 +3505,15 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
             return _abort(f"전자서명 중단: 상세주소 입력 실패 / 고객={job['name']} / 상세주소={address_detail}")
 
         time.sleep(0.8)
+
+        current_text = _read_edit_obj_text(edit)
+        current_norm = re.sub(r"\s+", "", str(current_text or ""))
+        expected_norm = re.sub(r"\s+", "", str(address_detail or ""))
+
+        if expected_norm and expected_norm not in current_norm:
+            return _abort(
+                f"전자서명 중단: 상세주소 입력값 불일치 / 고객={job['name']} / 기대={address_detail} / 현재={current_text}"
+            )
 
         try:
             if d(text="주소 입력").exists:
