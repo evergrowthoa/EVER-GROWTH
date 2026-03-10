@@ -2185,6 +2185,61 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
             f"전자서명 중단: 총 금액 또는 수납0원 불일치 / 고객={job['name']} / 모달금액={amount_raw}"
         )
 
+    def _dismiss_payment_info_notice_if_open() -> bool:
+        notice_fragments = [
+            "기본 설정 됩니다",
+            "사용 가능한 주문 건에만",
+            "등록한 결제정보 중",
+        ]
+
+        found = False
+
+        for frag in notice_fragments:
+            try:
+                if d(text=frag).exists:
+                    found = True
+                    break
+            except Exception:
+                pass
+
+            try:
+                if d(textContains=frag).exists:
+                    found = True
+                    break
+            except Exception:
+                pass
+
+        if not found:
+            return False
+
+        print("⚠️ [ready_sign] 결제정보 기본설정 안내 팝업 감지 → [확인] 클릭")
+
+        clicked = False
+
+        try:
+            if d(text="확인").exists:
+                d(text="확인").click()
+                clicked = True
+        except Exception:
+            clicked = False
+
+        if not clicked:
+            try:
+                if d(textContains="확인").exists:
+                    d(textContains="확인").click()
+                    clicked = True
+            except Exception:
+                clicked = False
+
+        if not clicked:
+            try:
+                clicked = click_text_center(d, "확인", 0.45, 0.98)
+            except Exception:
+                clicked = False
+
+        time.sleep(1.8)
+        return clicked
+
     def _wait_payment_info_ready(timeout_sec: float = 12.0) -> bool:
         end_at = time.time() + timeout_sec
         stable_ok_count = 0
@@ -2193,6 +2248,11 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
             try:
                 if is_unexpected_digital_sales_home(d):
                     return False
+
+                if _dismiss_payment_info_notice_if_open():
+                    stable_ok_count = 0
+                    time.sleep(0.4)
+                    continue
 
                 has_title = d(text="결제정보 선택").exists or d(textContains="결제정보 선택").exists
                 has_next = d(text="다음").exists
@@ -2222,7 +2282,7 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
     def _click_payment_method_selector() -> bool:
         try:
             if d(text="정기결제 수단 선택").exists:
-                ok = click_text_center(d, "정기결제 수단 선택", 0.20, 0.60)
+                ok = click_text_center(d, "정기결제 수단 선택", 0.20, 0.70)
                 time.sleep(1.5)
                 return ok
         except Exception:
@@ -2302,19 +2362,286 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
 
         return False
 
-    def _open_payment_method_and_click_add() -> bool:
+    def _wait_payment_method_add_page_ready(timeout_sec: float = 10.0) -> bool:
+        end_at = time.time() + timeout_sec
+        stable_ok_count = 0
+
+        while time.time() < end_at:
+            try:
+                if is_unexpected_digital_sales_home(d):
+                    return False
+
+                has_title = d(text="결제수단 추가").exists or d(textContains="결제수단 추가").exists
+                has_card_tab = d(text="카드이체").exists or d(textContains="카드이체").exists
+                has_bank_tab = d(text="은행이체").exists or d(textContains="은행이체").exists
+
+                if has_title and (has_card_tab or has_bank_tab):
+                    stable_ok_count += 1
+                    if stable_ok_count >= 2:
+                        print("✅ [ready_sign] 결제수단 추가 화면 준비 완료")
+                        time.sleep(0.5)
+                        return True
+                else:
+                    stable_ok_count = 0
+            except Exception:
+                stable_ok_count = 0
+
+            time.sleep(0.4)
+
+        print("❌ [ready_sign] 결제수단 추가 화면 준비 실패")
+        return False
+
+    def _is_card_expiry_like(account_raw: str) -> bool:
+        s = re.sub(r"\s+", "", str(account_raw or ""))
+        if not s:
+            return False
+
+        return bool(
+            re.search(r"(?<!\d)\d{2}/\d{2}(?!\d)", s)
+            or re.search(r"(?<!\d)\d{4}/\d{2}(?!\d)", s)
+            or re.search(r"(?<!\d)\d{2}/\d{4}(?!\d)", s)
+        )
+
+    def _extract_bank_name_from_account(account_raw: str) -> str:
+        s = re.sub(r"\s+", "", str(account_raw or ""))
+        if not s:
+            return ""
+
+        s = re.sub(r"[\d\*\-_/]", "", s)
+        s = re.sub(r"[^가-힣A-Za-z]", "", s)
+        return s.strip()
+
+    def _click_bank_transfer_tab_if_needed(account_raw: str) -> bool:
+        if _is_card_expiry_like(account_raw):
+            print(f"ℹ️ [ready_sign] 카드 유효기간 패턴 감지 → 카드이체 탭 유지 / 원본결제정보={account_raw}")
+            return True
+
+        try:
+            if d(text="은행이체").exists:
+                ok = click_text_center(d, "은행이체", 0.05, 0.20)
+                time.sleep(2.0)
+                if ok:
+                    print("✅ [ready_sign] 은행이체 탭 선택 완료")
+                    return True
+        except Exception:
+            pass
+
+        try:
+            if d(textContains="은행이체").exists:
+                d(textContains="은행이체").click()
+                time.sleep(2.0)
+                print("✅ [ready_sign] 은행이체 탭 선택 완료")
+                return True
+        except Exception:
+            pass
+
+        return False
+
+    def _open_bank_picker() -> bool:
+        try:
+            if d(text="은행입력").exists:
+                ok = click_text_center(d, "은행입력", 0.12, 0.45)
+                time.sleep(1.8)
+                return ok
+        except Exception:
+            pass
+
+        try:
+            if d(textContains="은행입력").exists:
+                d(textContains="은행입력").click()
+                time.sleep(1.8)
+                return True
+        except Exception:
+            pass
+
+        label_obj = None
+
+        try:
+            if d(text="은행").exists:
+                label_obj = d(text="은행")
+            elif d(textContains="은행").exists:
+                label_obj = d(textContains="은행")
+        except Exception:
+            label_obj = None
+
+        if label_obj is not None:
+            try:
+                w, h = d.window_size()
+                b = label_obj.info.get("bounds", {})
+                bottom = int(b.get("bottom", 0))
+                field_y = min(h - 20, bottom + max(55, int(h * 0.03)))
+
+                points = [
+                    (int(w * 0.50), field_y),
+                    (int(w * 0.82), field_y),
+                    (int(w * 0.65), field_y),
+                ]
+
+                for x, y in points:
+                    d.click(x, y)
+                    time.sleep(1.8)
+                    return True
+            except Exception:
+                pass
+
+        return False
+
+    def _collect_visible_bank_candidates():
+        items = _collect_visible_text_items(0.12, 0.96)
+
+        found = []
+        seen = set()
+
+        skip_texts = [
+            "은행선택",
+            "결제수단추가",
+            "카드이체",
+            "은행이체",
+            "취소",
+            "추가하기",
+            "추가",
+            "은행입력",
+            "계좌번호",
+            "이체일",
+            "명의",
+            "명의자",
+            "법정생년월일",
+        ]
+
+        for it in items:
+            txt = re.sub(r"\s+", "", str(it["text"] or ""))
+            if not txt:
+                continue
+            if txt in seen:
+                continue
+            if len(txt) > 20:
+                continue
+            if any(skip in txt for skip in skip_texts):
+                continue
+
+            seen.add(txt)
+            found.append({
+                "text": txt,
+                "bounds": it["bounds"],
+                "class_name": it["class_name"],
+            })
+
+        return found
+
+    def _bank_match_score(query_norm: str, cand_norm: str) -> int:
+        if not query_norm or not cand_norm:
+            return 0
+
+        cand_has_security = ("증권" in cand_norm) or ("투자" in cand_norm)
+        query_has_security = ("증권" in query_norm) or ("투자" in query_norm)
+
+        if cand_has_security and not query_has_security:
+            return 0
+
+        if cand_has_security and query_has_security:
+            if cand_norm == query_norm:
+                return 100
+            return 0
+
+        if cand_norm == query_norm:
+            return 95
+
+        q_simple = query_norm.replace("은행", "").replace("뱅크", "")
+        c_simple = cand_norm.replace("은행", "").replace("뱅크", "")
+
+        if q_simple and c_simple and q_simple == c_simple:
+            return 90
+
+        if query_norm in cand_norm:
+            return 80
+
+        if q_simple and q_simple in cand_norm:
+            return 75
+
+        if cand_norm in query_norm:
+            return 70
+
+        if c_simple and c_simple in query_norm:
+            return 65
+
+        return 0
+
+    def _choose_bank_from_picker(account_raw: str) -> bool:
+        bank_query = _extract_bank_name_from_account(account_raw)
+        if not bank_query:
+            return _abort(f"전자서명 중단: 결제정보에서 은행명 추출 실패 / 고객={job['name']} / 원본결제정보={account_raw}")
+
+        query_norm = re.sub(r"\s+", "", bank_query)
+        print(f"🔎 [ready_sign] 은행 선택 목표: {bank_query}")
+
+        for step in range(12):
+            candidates = _collect_visible_bank_candidates()
+
+            best_item = None
+            best_score = 0
+
+            for c in candidates:
+                cand_norm = re.sub(r"\s+", "", c["text"])
+                score = _bank_match_score(query_norm, cand_norm)
+                if score > best_score:
+                    best_score = score
+                    best_item = c
+
+            if best_item is not None and best_score > 0:
+                left, top, right, bottom = best_item["bounds"]
+                cx = (left + right) // 2
+                cy = (top + bottom) // 2
+                d.click(cx, cy)
+                time.sleep(2.0)
+                print(f"✅ [ready_sign] 은행 선택 완료: {best_item['text']} / 원본결제정보={account_raw}")
+                return True
+
+            if step < 11:
+                print(f"ℹ️ [ready_sign] 은행 리스트 스크롤 {step + 1}/11")
+                try:
+                    w, h = d.window_size()
+                    d.swipe(int(w * 0.50), int(h * 0.84), int(w * 0.50), int(h * 0.25), 0.25)
+                    time.sleep(1.2)
+                except Exception:
+                    pass
+
+        return _abort(f"전자서명 중단: 은행 리스트에서 일치 은행 미검출 / 고객={job['name']} / 원본결제정보={account_raw} / 목표은행={bank_query}")
+
+    def _open_payment_method_and_click_add(account_raw: str) -> bool:
         if not _wait_payment_info_ready(timeout_sec=12.0):
             return _abort(f"전자서명 중단: 결제정보 선택 화면 진입 실패 / 고객={job['name']}")
 
+        _dismiss_payment_info_notice_if_open()
+
         for attempt in range(3):
             print(f"🔎 [ready_sign] 정기결제 수단 선택 열기 시도 {attempt + 1}/3")
+
+            _dismiss_payment_info_notice_if_open()
 
             ok_click = _click_payment_method_selector()
             if not ok_click:
                 time.sleep(1.0)
 
             if _wait_payment_add_sheet_and_click_add(timeout_sec=6.0):
-                print(f"✅ [ready_sign] 결제수단 추가 팝업 처리 완료: {job['name']}")
+                print(f"✅ [ready_sign] 결제수단 추가 바텀시트 처리 완료: {job['name']}")
+
+                if not _wait_payment_method_add_page_ready(timeout_sec=10.0):
+                    return _abort(f"전자서명 중단: 결제수단 추가 화면 진입 실패 / 고객={job['name']}")
+
+                if not _click_bank_transfer_tab_if_needed(account_raw):
+                    return _abort(f"전자서명 중단: 카드/은행 탭 선택 실패 / 고객={job['name']} / 원본결제정보={account_raw}")
+
+                if _is_card_expiry_like(account_raw):
+                    print(f"✅ [ready_sign] 카드이체 탭 유지 완료: {job['name']}")
+                    return True
+
+                if not _open_bank_picker():
+                    return _abort(f"전자서명 중단: 은행입력 선택창 열기 실패 / 고객={job['name']} / 원본결제정보={account_raw}")
+
+                if not _choose_bank_from_picker(account_raw):
+                    return False
+
+                print(f"✅ [ready_sign] 은행이체 탭 + 은행 선택 완료: {job['name']}")
                 return True
 
             time.sleep(1.0)
@@ -2454,6 +2781,7 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
         contract_raw = (job.get("contract_raw") or "").strip()
         discount_raw = (job.get("discount_raw") or "").strip()
         amount_raw = (job.get("amount_raw") or "").strip()
+        account_raw = (job.get("account") or "").strip()
 
         if not search_model:
             return _abort(f"전자서명 중단: 모달 모델명 추출 실패 / 고객={job['name']}")
@@ -2472,6 +2800,9 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
 
         if not amount_raw:
             return _abort(f"전자서명 중단: 모달 금액 추출 실패 / 고객={job['name']} / 모델={search_model}")
+
+        if not account_raw:
+            return _abort(f"전자서명 중단: 모달 결제정보 추출 실패 / 고객={job['name']} / 모델={search_model}")
 
         if not d(text="주문 이어서 하기").exists:
             return _abort(f"전자서명 중단: 주문 이어서 하기 버튼 미검출 / 고객={job['name']}")
@@ -2509,15 +2840,15 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
         if not _verify_discount_and_amount_then_next(discount_raw, amount_raw):
             return False
 
-        if not _open_payment_method_and_click_add():
+        if not _open_payment_method_and_click_add(account_raw):
             return False
 
         SIGN_IN_PROGRESS = True
         sign_started.add(job["phone11"])
         notify(
-            f"전자서명 할인/결제수단추가 단계 완료: {job['name']} / {job['phone11']} / 모델={search_model} / 색상={color_raw} / 관리={manage_raw} / 약정={contract_raw} / 할인={discount_raw} / 금액={amount_raw}"
+            f"전자서명 결제정보 단계 완료: {job['name']} / {job['phone11']} / 결제정보={account_raw} / 모델={search_model} / 색상={color_raw} / 관리={manage_raw} / 약정={contract_raw}"
         )
-        print(f"✅ [ready_sign] 상품검색/색상/렌탈/관리/약정/할인검증/결제수단추가 완료: {job['name']}")
+        print(f"✅ [ready_sign] 상품검색/색상/렌탈/관리/약정/할인검증/결제정보추가/은행선택 완료: {job['name']}")
         return True
 
     return False
@@ -2745,7 +3076,7 @@ def emulator_main_loop():
                 if st == "인증완료":
                     ok = try_open_ready_sign_detail(d, j)
                     if ok:
-                        notify(f"✅ 인증완료 확인(매칭 OK): {j['name']} / {j['phone11']} → 관리/약정/상품담기 완료")
+                        notify(f"✅ 인증완료 확인(매칭 OK): {j['name']} / {j['phone11']} → 결제정보 추가/은행선택 단계까지 완료")
                     else:
                         back_to_order_status(d)
 
