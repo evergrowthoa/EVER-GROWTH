@@ -3415,12 +3415,23 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
     def _find_detail_address_edittext():
         try:
             w, h = d.window_size()
+
+            submit_top = None
+            try:
+                if d(text="주소 입력").exists:
+                    b = d(text="주소 입력").info.get("bounds", {})
+                    submit_top = int(b.get("top", 0))
+                elif d(textContains="주소 입력").exists:
+                    b = d(textContains="주소 입력").info.get("bounds", {})
+                    submit_top = int(b.get("top", 0))
+            except Exception:
+                submit_top = None
+
             edits = d(className="android.widget.EditText")
             cnt = edits.count
 
             best = None
-            best_top = -1
-            best_width = 0
+            best_score = None
 
             for i in range(cnt):
                 try:
@@ -3434,7 +3445,7 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
                     width = right - left
                     height = bottom - top
 
-                    if top < int(h * 0.20) or bottom > int(h * 0.82):
+                    if top < int(h * 0.16) or bottom > int(h * 0.84):
                         continue
 
                     if width < int(w * 0.45):
@@ -3449,16 +3460,74 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
                     if "충북" in text_norm or "청주시" in text_norm or "호미로" in text_norm:
                         continue
 
-                    if top > best_top or (top == best_top and width > best_width):
+                    score = 999999
+
+                    if submit_top is not None:
+                        if bottom >= submit_top:
+                            continue
+                        score = abs(submit_top - bottom)
+                    else:
+                        score = -top
+
+                    if best is None or score < best_score:
                         best = e
-                        best_top = top
-                        best_width = width
+                        best_score = score
                 except Exception:
                     continue
 
             return best
         except Exception:
             return None
+
+    def _click_detail_address_field(edit) -> bool:
+        try:
+            b = edit.info.get("bounds", {})
+            left = int(b.get("left", 0))
+            top = int(b.get("top", 0))
+            right = int(b.get("right", 0))
+            bottom = int(b.get("bottom", 0))
+
+            cx = (left + right) // 2
+            cy = (top + bottom) // 2
+
+            d.click(cx, cy)
+            time.sleep(0.5)
+            return True
+        except Exception:
+            return False
+
+    def _click_address_submit_button() -> bool:
+        try:
+            if d(text="주소 입력").exists:
+                ok = click_text_center(d, "주소 입력", 0.70, 0.99)
+                time.sleep(1.2)
+                return ok
+        except Exception:
+            pass
+
+        try:
+            if d(textContains="주소 입력").exists:
+                d(textContains="주소 입력").click()
+                time.sleep(1.2)
+                return True
+        except Exception:
+            pass
+
+        return False
+
+    def _is_address_detail_screen_now() -> bool:
+        try:
+            has_title = d(text="주소입력").exists or d(textContains="주소입력").exists
+        except Exception:
+            has_title = False
+
+        try:
+            has_submit = d(text="주소 입력").exists or d(textContains="주소 입력").exists
+        except Exception:
+            has_submit = False
+
+        detail_edit = _find_detail_address_edittext()
+        return has_title and has_submit and detail_edit is not None
 
     def _wait_address_detail_ready(timeout_sec: float = 12.0) -> bool:
         end_at = time.time() + timeout_sec
@@ -3469,11 +3538,7 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
                 if is_unexpected_digital_sales_home(d):
                     return False
 
-                has_title = d(text="주소입력").exists or d(textContains="주소입력").exists
-                has_submit = d(text="주소 입력").exists or d(textContains="주소 입력").exists
-                detail_edit = _find_detail_address_edittext()
-
-                if has_title and has_submit and detail_edit is not None:
+                if _is_address_detail_screen_now():
                     stable_ok_count += 1
                     if stable_ok_count >= 2:
                         print("✅ [ready_sign] 주소 상세입력 화면 준비 완료")
@@ -3496,42 +3561,59 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
         if not _wait_address_detail_ready(timeout_sec=12.0):
             return False
 
-        edit = _find_detail_address_edittext()
-        if edit is None:
-            return _abort(f"전자서명 중단: 상세주소 입력칸 미검출 / 고객={job['name']}")
-
-        ok = type_into_edittext(d, edit, address_detail)
-        if not ok:
-            return _abort(f"전자서명 중단: 상세주소 입력 실패 / 고객={job['name']} / 상세주소={address_detail}")
-
-        time.sleep(0.8)
-
-        current_text = _read_edit_obj_text(edit)
-        current_norm = re.sub(r"\s+", "", str(current_text or ""))
         expected_norm = re.sub(r"\s+", "", str(address_detail or ""))
 
-        if expected_norm and expected_norm not in current_norm:
-            return _abort(
-                f"전자서명 중단: 상세주소 입력값 불일치 / 고객={job['name']} / 기대={address_detail} / 현재={current_text}"
-            )
+        for attempt in range(3):
+            edit = _find_detail_address_edittext()
+            if edit is None:
+                return _abort(f"전자서명 중단: 상세주소 입력칸 미검출 / 고객={job['name']}")
 
-        try:
-            if d(text="주소 입력").exists:
-                ok_click = click_text_center(d, "주소 입력", 0.45, 0.98)
-            elif d(textContains="주소 입력").exists:
-                d(textContains="주소 입력").click()
-                ok_click = True
-            else:
-                ok_click = False
-        except Exception:
-            ok_click = False
+            _click_detail_address_field(edit)
 
-        if not ok_click:
-            return _abort(f"전자서명 중단: 상세주소 주소입력 버튼 클릭 실패 / 고객={job['name']}")
+            ok = type_into_edittext(d, edit, address_detail)
+            if not ok:
+                if attempt == 2:
+                    return _abort(f"전자서명 중단: 상세주소 입력 실패 / 고객={job['name']} / 상세주소={address_detail}")
+                time.sleep(0.8)
+                continue
 
-        time.sleep(2.0)
-        print(f"✅ [ready_sign] 상세주소 입력 및 주소 등록 완료: {address_detail}")
-        return True
+            time.sleep(0.8)
+
+            edit = _find_detail_address_edittext()
+            if edit is None:
+                return _abort(f"전자서명 중단: 상세주소 입력칸 재검출 실패 / 고객={job['name']}")
+
+            current_text = _read_edit_obj_text(edit)
+            current_norm = re.sub(r"\s+", "", str(current_text or ""))
+
+            if expected_norm and expected_norm not in current_norm:
+                if attempt == 2:
+                    return _abort(
+                        f"전자서명 중단: 상세주소 입력값 불일치 / 고객={job['name']} / 기대={address_detail} / 현재={current_text}"
+                    )
+                time.sleep(0.8)
+                continue
+
+            ok_click = _click_address_submit_button()
+            if not ok_click:
+                if attempt == 2:
+                    return _abort(f"전자서명 중단: 상세주소 주소입력 버튼 클릭 실패 / 고객={job['name']}")
+                time.sleep(0.8)
+                continue
+
+            if _wait_install_info_ready(timeout_sec=4.0):
+                print(f"✅ [ready_sign] 상세주소 입력 및 주소 등록 완료: {address_detail}")
+                return True
+
+            if _is_address_detail_screen_now():
+                print(f"⚠️ [ready_sign] 상세주소 입력 후 아직 같은 화면 → 재시도 {attempt + 1}/3")
+                time.sleep(1.0)
+                continue
+
+            if attempt == 2:
+                return _abort(f"전자서명 중단: 상세주소 입력 후 화면 전환 실패 / 고객={job['name']}")
+
+        return _abort(f"전자서명 중단: 상세주소 입력 처리 최종 실패 / 고객={job['name']}")
 
     def _fill_install_info_address(phone11: str, zipcode: str, address_basic: str, address_detail: str) -> bool:
         if not _wait_install_info_ready(timeout_sec=12.0):
