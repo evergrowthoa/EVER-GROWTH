@@ -1736,8 +1736,8 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
         print(f"✅ [ready_sign] 최종 상품 선택: {chosen['text']}")
         d.click(cx, cy)
 
-        print("⏳ [ready_sign] 색상 선택 후 주문접수/상품선택 전환 대기 8.0초")
-        time.sleep(8.0)
+        print("⏳ [ready_sign] 색상 선택 후 주문접수/상품선택 전환 대기 10.0초")
+        time.sleep(10.0)
 
         if _is_search_return_popup_open():
             _dismiss_search_return_popup_if_open()
@@ -2010,46 +2010,84 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
         return False
 
     def _verify_total_amount_row(expected_amount_digits: str) -> bool:
-        items = _collect_visible_text_items(0.40, 0.99)
+        items = _collect_visible_text_items(0.20, 0.99)
 
-        total_rows = []
-        for it in items:
-            norm = re.sub(r"\s+", "", it["text"])
-            if "총금액" in norm:
-                left, top, right, bottom = it["bounds"]
-                cy = (top + bottom) // 2
-                total_rows.append(cy)
-
-        if not total_rows:
-            print("⚠️ [ready_sign] 총 금액 행 미검출")
-            return False
-
-        row_cy = sorted(total_rows)[-1]
-        row_items = []
+        merged_texts = []
+        seen = set()
 
         for it in items:
-            left, top, right, bottom = it["bounds"]
-            cy = (top + bottom) // 2
-            if abs(cy - row_cy) <= 100:
-                row_items.append(it)
+            norm = re.sub(r"\s+", "", str(it["text"] or ""))
+            if norm and norm not in seen:
+                merged_texts.append(norm)
+                seen.add(norm)
+
+        xml = ""
+        try:
+            xml = d.dump_hierarchy()
+        except Exception:
+            xml = ""
+
+        if xml:
+            try:
+                xml_texts = re.findall(r'text="([^"]*)"', xml)
+                for raw in xml_texts:
+                    norm = re.sub(r"\s+", "", str(raw or ""))
+                    if norm and norm not in seen:
+                        merged_texts.append(norm)
+                        seen.add(norm)
+            except Exception:
+                pass
+
+            try:
+                xml_descs = re.findall(r'content-desc="([^"]*)"', xml)
+                for raw in xml_descs:
+                    norm = re.sub(r"\s+", "", str(raw or ""))
+                    if norm and norm not in seen:
+                        merged_texts.append(norm)
+                        seen.add(norm)
+            except Exception:
+                pass
+
+        has_total_label = any("총금액" in t for t in merged_texts)
 
         has_receipt_zero = False
-        amount_match = False
-
-        for it in row_items:
-            norm = re.sub(r"\s+", "", it["text"])
-            digits = normalize_digits(norm)
-
-            if "수납0원" in norm or ("수납" in norm and digits == "0"):
+        if any("수납0원" in t for t in merged_texts):
+            has_receipt_zero = True
+        elif any(("수납" in t and normalize_digits(t) == "0") for t in merged_texts):
+            has_receipt_zero = True
+        else:
+            has_receipt_word = any("수납" in t for t in merged_texts)
+            has_zero_won = any(
+                (t == "0원") or ("원" in t and normalize_digits(t) == "0")
+                for t in merged_texts
+            )
+            if has_receipt_word and has_zero_won:
                 has_receipt_zero = True
 
-            if digits and digits == expected_amount_digits:
+        amount_match = False
+        for t in merged_texts:
+            digits = normalize_digits(t)
+            if digits and digits == expected_amount_digits and "원" in t:
                 amount_match = True
+                break
+
+        if not amount_match and expected_amount_digits:
+            try:
+                expected_num = int(expected_amount_digits)
+                expected_won = f"{expected_num:,}원"
+                expected_won_month = f"{expected_num:,}원/월"
+                joined = " ".join(merged_texts)
+
+                if expected_won_month in joined or expected_won in joined:
+                    amount_match = True
+            except Exception:
+                pass
 
         print(
-            f"🔎 [ready_sign] 총금액 검증 / 수납0원={has_receipt_zero} / 금액일치={amount_match} / 기대금액={expected_amount_digits}"
+            f"🔎 [ready_sign] 총금액 검증 / 총금액표시={has_total_label} / 수납0원={has_receipt_zero} / 금액일치={amount_match} / 기대금액={expected_amount_digits}"
         )
-        return has_receipt_zero and amount_match
+
+        return has_total_label and has_receipt_zero and amount_match
 
     def _click_add_product_and_go_discount() -> bool:
         if not d(text="상품 담기").exists:
