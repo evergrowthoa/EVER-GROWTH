@@ -2836,35 +2836,34 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
         except Exception:
             return False
 
-    def _handle_payment_add_error_popup_if_any() -> bool:
-        has_confirm = False
+    def _click_cancel_if_exists() -> bool:
+        try:
+            if d(text="취소").exists:
+                d(text="취소").click()
+                time.sleep(1.2)
+                return True
+        except Exception:
+            pass
 
         try:
-            has_confirm = d(text="확인").exists or d(textContains="확인").exists
+            if d(textContains="취소").exists:
+                d(textContains="취소").click()
+                time.sleep(1.2)
+                return True
         except Exception:
-            has_confirm = False
+            pass
 
-        if not has_confirm:
-            return True
+        try:
+            ok = click_text_center(d, "취소", 0.45, 0.98)
+            if ok:
+                time.sleep(1.2)
+            return ok
+        except Exception:
+            return False
 
-        items = _collect_visible_text_items(0.30, 0.82)
-        ignore_fragments = [
-            "결제수단추가",
-            "은행이체",
-            "카드이체",
-            "은행",
-            "계좌번호",
-            "이체일",
-            "명의",
-            "명의자",
-            "법정생년월일",
-            "추가하기",
-            "취소",
-            "확인",
-            "카카오뱅크",
-        ]
-
-        msgs = []
+    def _collect_popup_texts(y_min_ratio: float = 0.20, y_max_ratio: float = 0.82):
+        items = _collect_visible_text_items(y_min_ratio, y_max_ratio)
+        texts = []
         seen = set()
 
         for it in items:
@@ -2873,31 +2872,149 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
                 continue
             if txt in seen:
                 continue
-            if len(txt) > 60:
-                continue
-            if any(frag in txt for frag in ignore_fragments):
-                continue
             seen.add(txt)
-            msgs.append(txt)
+            texts.append(txt)
 
-        _click_confirm_if_exists()
+        return texts
 
-        popup_msg = " | ".join(msgs[:3]).strip() or "popup"
-        return _abort(f"결제정보 오류 / 고객={job['name']} / 팝업={popup_msg}")
+    def _is_prev_stage_move_popup_open() -> bool:
+        popup_fragments = [
+            "이전단계로이동",
+            "이전 단계로 이동",
+            "설정하신상품의할인정보및설치정보는저장되지않아",
+            "선택한상품만유지되며",
+        ]
+
+        texts = _collect_popup_texts(0.20, 0.82)
+        joined = " ".join(texts)
+
+        for frag in popup_fragments:
+            if re.sub(r"\s+", "", frag) in joined:
+                return True
+
+        return False
+
+    def _dismiss_prev_stage_move_popup_if_open() -> bool:
+        if not _is_prev_stage_move_popup_open():
+            return False
+
+        print("⚠️ [ready_sign] 이전 단계 이동 팝업 감지 → [취소] 클릭 후 현재 단계 유지")
+        clicked = _click_cancel_if_exists()
+        time.sleep(1.2)
+        return clicked
+
+    def _is_payment_error_popup_open() -> bool:
+        texts = _collect_popup_texts(0.20, 0.82)
+        joined = " ".join(texts)
+
+        if not joined:
+            return False
+
+        error_fragments = [
+            "오류",
+            "센터계좌체계오류",
+            "결제정보",
+            "계좌",
+            "입력값",
+            "불가",
+            "실패",
+        ]
+
+        if _is_prev_stage_move_popup_open():
+            return False
+
+        for frag in error_fragments:
+            if re.sub(r"\s+", "", frag) in joined:
+                return True
+
+        return False
+
+    def _popup_message_for_log() -> str:
+        texts = _collect_popup_texts(0.20, 0.82)
+        ignore_fragments = [
+            "확인",
+            "취소",
+            "추가하기",
+            "추가",
+            "결제수단추가",
+            "카드이체",
+            "은행이체",
+        ]
+
+        picked = []
+        for txt in texts:
+            if any(re.sub(r"\s+", "", frag) in txt for frag in ignore_fragments):
+                continue
+            picked.append(txt)
+
+        return " | ".join(picked[:3]).strip() or "popup"
+
+    def _wait_after_payment_submit(timeout_sec: float = 10.0) -> bool:
+        end_at = time.time() + timeout_sec
+
+        while time.time() < end_at:
+            if is_unexpected_digital_sales_home(d):
+                return _abort(f"전자서명 중단: 결제수단 추가 후 홈이탈 / 고객={job['name']}")
+
+            if _dismiss_prev_stage_move_popup_if_open():
+                time.sleep(0.8)
+                continue
+
+            if _is_payment_error_popup_open():
+                popup_msg = _popup_message_for_log()
+                _click_confirm_if_exists()
+                return _abort(f"결제정보 오류 / 고객={job['name']} / 팝업={popup_msg}")
+
+            if _wait_payment_info_ready(timeout_sec=1.5):
+                print(f"✅ [ready_sign] 결제수단 추가 후 결제정보 선택 화면 복귀 확인: {job['name']}")
+                return True
+
+            if _wait_install_info_ready(timeout_sec=1.5):
+                print(f"✅ [ready_sign] 결제수단 추가 후 설치정보 화면 진입 확인: {job['name']}")
+                return True
+
+            time.sleep(0.3)
+
+        return _abort(f"전자서명 중단: 결제수단 추가 후 다음 화면 판정 실패 / 고객={job['name']}")
 
     def _click_payment_info_next() -> bool:
         if not _wait_payment_info_ready(timeout_sec=10.0):
             return False
 
-        _dismiss_payment_info_notice_if_open()
+        for attempt in range(3):
+            _dismiss_payment_info_notice_if_open()
+            _dismiss_prev_stage_move_popup_if_open()
 
-        try:
-            if d(text="다음").exists:
-                ok = click_text_center(d, "다음", 0.90, 0.99)
-                time.sleep(2.0)
-                return ok
-        except Exception:
-            pass
+            try:
+                if d(text="다음").exists:
+                    ok = click_text_center(d, "다음", 0.88, 0.99)
+                elif d(textContains="다음").exists:
+                    d(textContains="다음").click()
+                    ok = True
+                else:
+                    ok = False
+            except Exception:
+                ok = False
+
+            if not ok:
+                time.sleep(0.8)
+                continue
+
+            time.sleep(2.0)
+
+            if _dismiss_prev_stage_move_popup_if_open():
+                print(f"⚠️ [ready_sign] 결제정보 다음 클릭 후 이전단계 팝업 발생 → 재시도 {attempt + 1}/3")
+                time.sleep(0.8)
+                continue
+
+            if _wait_install_info_ready(timeout_sec=4.0):
+                print(f"✅ [ready_sign] 결제정보 선택 화면 다음 클릭 완료: {job['name']}")
+                return True
+
+            if _wait_payment_info_ready(timeout_sec=1.5):
+                print(f"⚠️ [ready_sign] 결제정보 다음 클릭 후 아직 같은 화면 → 재시도 {attempt + 1}/3")
+                time.sleep(0.8)
+                continue
 
         return False
 
@@ -2914,7 +3031,7 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
 
         for it in items:
             txt = re.sub(r"\s+", "", str(it["text"] or ""))
-            if any(frag in txt for frag in popup_fragments):
+            if any(re.sub(r"\s+", "", frag) in txt for frag in popup_fragments):
                 found = True
                 break
 
@@ -2923,29 +3040,7 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
 
         print("⚠️ [ready_sign] 기존 설치처 정보 팝업 감지 → [취소] 클릭 후 직접 입력 진행")
 
-        clicked = False
-
-        try:
-            if d(text="취소").exists:
-                d(text="취소").click()
-                clicked = True
-        except Exception:
-            clicked = False
-
-        if not clicked:
-            try:
-                if d(textContains="취소").exists:
-                    d(textContains="취소").click()
-                    clicked = True
-            except Exception:
-                clicked = False
-
-        if not clicked:
-            try:
-                clicked = click_text_center(d, "취소", 0.45, 0.98)
-            except Exception:
-                clicked = False
-
+        clicked = _click_cancel_if_exists()
         time.sleep(1.8)
         return clicked
 
@@ -3327,7 +3422,7 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
 
         print(f"✅ [ready_sign] 설치정보 주소 입력 완료: {job['name']}")
         return True
-
+    
     def _open_payment_method_and_click_add(account_raw: str) -> bool:
         if not _wait_payment_info_ready(timeout_sec=12.0):
             return _abort(f"전자서명 중단: 결제정보 선택 화면 진입 실패 / 고객={job['name']}")
@@ -3367,11 +3462,12 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
                 if not _click_payment_method_submit():
                     return _abort(f"전자서명 중단: 결제수단 추가하기 버튼 클릭 실패 / 고객={job['name']}")
 
-                if not _handle_payment_add_error_popup_if_any():
+                if not _wait_after_payment_submit(timeout_sec=10.0):
                     return False
 
-                if not _wait_payment_info_ready(timeout_sec=10.0):
-                    return _abort(f"전자서명 중단: 결제수단 추가 후 결제정보 선택 화면 복귀 실패 / 고객={job['name']}")
+                if _wait_install_info_ready(timeout_sec=2.0):
+                    print(f"✅ [ready_sign] 결제수단 추가 후 이미 설치정보 화면 진입: {job['name']}")
+                    return True
 
                 if not _click_payment_info_next():
                     return _abort(f"전자서명 중단: 결제정보 선택 화면 다음 버튼 클릭 실패 / 고객={job['name']}")
