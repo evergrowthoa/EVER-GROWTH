@@ -2411,6 +2411,164 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
         s = re.sub(r"[^가-힣A-Za-z]", "", s)
         return s.strip()
 
+    def _extract_account_digits(account_raw: str) -> str:
+        return normalize_digits(account_raw or "")
+
+    def _read_edit_obj_text(obj) -> str:
+        try:
+            return (obj.get_text() or "").strip()
+        except Exception:
+            try:
+                info = obj.info or {}
+                return str(info.get("text") or "").strip()
+            except Exception:
+                return ""
+
+    def _find_first_label_obj(label_candidates):
+        for lab in label_candidates:
+            try:
+                if d(text=lab).exists:
+                    return d(text=lab)
+            except Exception:
+                pass
+
+        for lab in label_candidates:
+            try:
+                if d(textContains=lab).exists:
+                    return d(textContains=lab)
+            except Exception:
+                pass
+
+        return None
+
+    def _find_edittext_near_label(label_candidates, y_tolerance: int = 110, y_below: int = 220):
+        label_obj = _find_first_label_obj(label_candidates)
+
+        try:
+            edits = d(className="android.widget.EditText")
+            cnt = edits.count
+        except Exception:
+            cnt = 0
+
+        best = None
+        best_score = None
+
+        label_left = 0
+        label_right = 0
+        label_cy = 0
+        label_bottom = 0
+
+        if label_obj is not None:
+            try:
+                b = label_obj.info.get("bounds", {})
+                label_left = int(b.get("left", 0))
+                label_right = int(b.get("right", 0))
+                label_top = int(b.get("top", 0))
+                label_bottom = int(b.get("bottom", 0))
+                label_cy = (label_top + label_bottom) // 2
+            except Exception:
+                label_obj = None
+
+        for i in range(cnt):
+            try:
+                e = edits[i]
+                b = e.info.get("bounds", {})
+                left = int(b.get("left", 0))
+                top = int(b.get("top", 0))
+                right = int(b.get("right", 0))
+                bottom = int(b.get("bottom", 0))
+                cy = (top + bottom) // 2
+                bw = right - left
+
+                if bw < 160:
+                    continue
+
+                score = None
+
+                if label_obj is not None:
+                    if abs(cy - label_cy) <= y_tolerance and left >= max(0, label_left - 20):
+                        score = abs(cy - label_cy) + abs(left - label_right)
+                    elif top >= label_bottom - 10 and top <= label_bottom + y_below:
+                        score = 1000 + abs(top - label_bottom)
+                else:
+                    score = top
+
+                if score is not None and (best is None or score < best_score):
+                    best = e
+                    best_score = score
+            except Exception:
+                continue
+
+        return best
+
+    def _find_top_widest_edittext(y_min_ratio: float = 0.05, y_max_ratio: float = 0.25):
+        try:
+            w, h = d.window_size()
+            edits = d(className="android.widget.EditText")
+            cnt = edits.count
+        except Exception:
+            return None
+
+        best = None
+        best_w = 0
+        best_top = 10**9
+
+        for i in range(cnt):
+            try:
+                e = edits[i]
+                b = e.info.get("bounds", {})
+                left = int(b.get("left", 0))
+                top = int(b.get("top", 0))
+                right = int(b.get("right", 0))
+                bottom = int(b.get("bottom", 0))
+                bw = right - left
+
+                if top < int(h * y_min_ratio) or bottom > int(h * y_max_ratio):
+                    continue
+
+                if bw > best_w or (bw == best_w and top < best_top):
+                    best = e
+                    best_w = bw
+                    best_top = top
+            except Exception:
+                continue
+
+        return best
+
+    def _find_lowest_widest_edittext(y_min_ratio: float = 0.20, y_max_ratio: float = 0.85):
+        try:
+            w, h = d.window_size()
+            edits = d(className="android.widget.EditText")
+            cnt = edits.count
+        except Exception:
+            return None
+
+        best = None
+        best_top = -1
+        best_w = 0
+
+        for i in range(cnt):
+            try:
+                e = edits[i]
+                b = e.info.get("bounds", {})
+                left = int(b.get("left", 0))
+                top = int(b.get("top", 0))
+                right = int(b.get("right", 0))
+                bottom = int(b.get("bottom", 0))
+                bw = right - left
+
+                if top < int(h * y_min_ratio) or bottom > int(h * y_max_ratio):
+                    continue
+
+                if top > best_top or (top == best_top and bw > best_w):
+                    best = e
+                    best_top = top
+                    best_w = bw
+            except Exception:
+                continue
+
+        return best
+
     def _click_bank_transfer_tab_if_needed(account_raw: str) -> bool:
         if _is_card_expiry_like(account_raw):
             print(f"ℹ️ [ready_sign] 카드 유효기간 패턴 감지 → 카드이체 탭 유지 / 원본결제정보={account_raw}")
@@ -2607,6 +2765,569 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
 
         return _abort(f"전자서명 중단: 은행 리스트에서 일치 은행 미검출 / 고객={job['name']} / 원본결제정보={account_raw} / 목표은행={bank_query}")
 
+    def _fill_bank_account_number(account_raw: str) -> bool:
+        account_digits = _extract_account_digits(account_raw)
+        if not account_digits:
+            return _abort(f"전자서명 중단: 결제정보 숫자 추출 실패 / 고객={job['name']} / 원본결제정보={account_raw}")
+
+        edit = _find_edittext_near_label(["계좌번호"], y_tolerance=80, y_below=180)
+        if edit is None:
+            return _abort(f"전자서명 중단: 계좌번호 입력칸 미검출 / 고객={job['name']}")
+
+        current_digits = normalize_digits(_read_edit_obj_text(edit))
+        if current_digits == account_digits:
+            print(f"✅ [ready_sign] 계좌번호 이미 입력 일치: {account_digits}")
+            return True
+
+        ok = type_into_edittext(d, edit, account_digits)
+        if not ok:
+            return _abort(f"전자서명 중단: 계좌번호 입력 실패 / 고객={job['name']} / 계좌번호={account_digits}")
+
+        time.sleep(1.0)
+
+        current_digits = normalize_digits(_read_edit_obj_text(edit))
+        if current_digits != account_digits:
+            return _abort(f"전자서명 중단: 계좌번호 입력값 불일치 / 고객={job['name']} / 기대={account_digits} / 현재={current_digits}")
+
+        print(f"✅ [ready_sign] 계좌번호 입력 완료: {account_digits}")
+        return True
+
+    def _click_payment_method_submit() -> bool:
+        try:
+            if d(text="추가하기").exists:
+                ok = click_text_center(d, "추가하기", 0.82, 0.99)
+                time.sleep(2.0)
+                return ok
+        except Exception:
+            pass
+
+        try:
+            if d(textContains="추가하기").exists:
+                d(textContains="추가하기").click()
+                time.sleep(2.0)
+                return True
+        except Exception:
+            pass
+
+        return False
+
+    def _click_confirm_if_exists() -> bool:
+        try:
+            if d(text="확인").exists:
+                d(text="확인").click()
+                time.sleep(1.2)
+                return True
+        except Exception:
+            pass
+
+        try:
+            if d(textContains="확인").exists:
+                d(textContains="확인").click()
+                time.sleep(1.2)
+                return True
+        except Exception:
+            pass
+
+        try:
+            ok = click_text_center(d, "확인", 0.45, 0.98)
+            if ok:
+                time.sleep(1.2)
+            return ok
+        except Exception:
+            return False
+
+    def _handle_payment_add_error_popup_if_any() -> bool:
+        has_confirm = False
+
+        try:
+            has_confirm = d(text="확인").exists or d(textContains="확인").exists
+        except Exception:
+            has_confirm = False
+
+        if not has_confirm:
+            return True
+
+        items = _collect_visible_text_items(0.30, 0.82)
+        ignore_fragments = [
+            "결제수단추가",
+            "은행이체",
+            "카드이체",
+            "은행",
+            "계좌번호",
+            "이체일",
+            "명의",
+            "명의자",
+            "법정생년월일",
+            "추가하기",
+            "취소",
+            "확인",
+            "카카오뱅크",
+        ]
+
+        msgs = []
+        seen = set()
+
+        for it in items:
+            txt = re.sub(r"\s+", "", str(it["text"] or ""))
+            if not txt:
+                continue
+            if txt in seen:
+                continue
+            if len(txt) > 60:
+                continue
+            if any(frag in txt for frag in ignore_fragments):
+                continue
+            seen.add(txt)
+            msgs.append(txt)
+
+        _click_confirm_if_exists()
+
+        popup_msg = " | ".join(msgs[:3]).strip() or "popup"
+        return _abort(f"결제정보 오류 / 고객={job['name']} / 팝업={popup_msg}")
+
+    def _click_payment_info_next() -> bool:
+        if not _wait_payment_info_ready(timeout_sec=10.0):
+            return False
+
+        _dismiss_payment_info_notice_if_open()
+
+        try:
+            if d(text="다음").exists:
+                ok = click_text_center(d, "다음", 0.90, 0.99)
+                time.sleep(2.0)
+                return ok
+        except Exception:
+            pass
+
+        return False
+
+    def _dismiss_existing_install_info_popup_if_open() -> bool:
+        popup_fragments = [
+            "설치처정보가있습니다",
+            "설치처 정보가 있습니다",
+            "해당정보로주문및설치를진행",
+            "해당 정보로 주문 및 설치를 진행",
+        ]
+
+        items = _collect_visible_text_items(0.25, 0.80)
+        found = False
+
+        for it in items:
+            txt = re.sub(r"\s+", "", str(it["text"] or ""))
+            if any(frag in txt for frag in popup_fragments):
+                found = True
+                break
+
+        if not found:
+            return False
+
+        print("⚠️ [ready_sign] 기존 설치처 정보 팝업 감지 → [취소] 클릭 후 직접 입력 진행")
+
+        clicked = False
+
+        try:
+            if d(text="취소").exists:
+                d(text="취소").click()
+                clicked = True
+        except Exception:
+            clicked = False
+
+        if not clicked:
+            try:
+                if d(textContains="취소").exists:
+                    d(textContains="취소").click()
+                    clicked = True
+            except Exception:
+                clicked = False
+
+        if not clicked:
+            try:
+                clicked = click_text_center(d, "취소", 0.45, 0.98)
+            except Exception:
+                clicked = False
+
+        time.sleep(1.8)
+        return clicked
+
+    def _wait_install_info_ready(timeout_sec: float = 12.0) -> bool:
+        end_at = time.time() + timeout_sec
+        stable_ok_count = 0
+
+        while time.time() < end_at:
+            try:
+                if is_unexpected_digital_sales_home(d):
+                    return False
+
+                if _dismiss_existing_install_info_popup_if_open():
+                    stable_ok_count = 0
+                    time.sleep(0.4)
+                    continue
+
+                has_title = d(text="설치정보").exists or d(textContains="설치정보").exists
+                has_phone = d(text="휴대폰번호").exists or d(textContains="휴대폰번호").exists
+                has_address = d(text="주소").exists or d(textContains="주소").exists
+
+                if has_title and has_phone and has_address:
+                    stable_ok_count += 1
+                    if stable_ok_count >= 2:
+                        print("✅ [ready_sign] 설치정보 화면 준비 완료")
+                        time.sleep(0.5)
+                        return True
+                else:
+                    stable_ok_count = 0
+            except Exception:
+                stable_ok_count = 0
+
+            time.sleep(0.4)
+
+        print("❌ [ready_sign] 설치정보 화면 준비 실패")
+        return False
+
+    def _fill_install_phone(phone11: str) -> bool:
+        if not phone11:
+            return _abort(f"전자서명 중단: 휴대폰번호 값 없음 / 고객={job['name']}")
+
+        edit = _find_edittext_near_label(["휴대폰번호"], y_tolerance=80, y_below=160)
+        if edit is None:
+            return _abort(f"전자서명 중단: 휴대폰번호 입력칸 미검출 / 고객={job['name']}")
+
+        current_digits = normalize_digits(_read_edit_obj_text(edit))
+        if current_digits == phone11:
+            print(f"✅ [ready_sign] 휴대폰번호 이미 입력 일치: {phone11}")
+            return True
+
+        ok = type_into_edittext(d, edit, phone11)
+        if not ok:
+            return _abort(f"전자서명 중단: 휴대폰번호 입력 실패 / 고객={job['name']} / 휴대폰번호={phone11}")
+
+        time.sleep(1.0)
+
+        current_digits = normalize_digits(_read_edit_obj_text(edit))
+        if current_digits != phone11:
+            return _abort(f"전자서명 중단: 휴대폰번호 입력값 불일치 / 고객={job['name']} / 기대={phone11} / 현재={current_digits}")
+
+        print(f"✅ [ready_sign] 휴대폰번호 입력 완료: {phone11}")
+        return True
+
+    def _click_install_address_input_button() -> bool:
+        try:
+            if d(text="주소 입력").exists:
+                ok = click_text_center(d, "주소 입력", 0.25, 0.70)
+                time.sleep(1.8)
+                return ok
+        except Exception:
+            pass
+
+        try:
+            if d(textContains="주소 입력").exists:
+                d(textContains="주소 입력").click()
+                time.sleep(1.8)
+                return True
+        except Exception:
+            pass
+
+        return False
+
+    def _wait_address_management_ready(timeout_sec: float = 10.0) -> bool:
+        end_at = time.time() + timeout_sec
+        stable_ok_count = 0
+
+        while time.time() < end_at:
+            try:
+                if is_unexpected_digital_sales_home(d):
+                    return False
+
+                has_title = d(text="주소지 관리").exists or d(textContains="주소지 관리").exists
+                has_add = d(text="새 주소지 추가").exists or d(textContains="새 주소지 추가").exists
+
+                if has_title and has_add:
+                    stable_ok_count += 1
+                    if stable_ok_count >= 2:
+                        print("✅ [ready_sign] 주소지 관리 화면 준비 완료")
+                        time.sleep(0.4)
+                        return True
+                else:
+                    stable_ok_count = 0
+            except Exception:
+                stable_ok_count = 0
+
+            time.sleep(0.4)
+
+        print("❌ [ready_sign] 주소지 관리 화면 준비 실패")
+        return False
+
+    def _click_new_address_add() -> bool:
+        try:
+            if d(text="새 주소지 추가").exists:
+                ok = click_text_center(d, "새 주소지 추가", 0.30, 0.80)
+                time.sleep(1.8)
+                return ok
+        except Exception:
+            pass
+
+        try:
+            if d(textContains="새 주소지 추가").exists:
+                d(textContains="새 주소지 추가").click()
+                time.sleep(1.8)
+                return True
+        except Exception:
+            pass
+
+        return False
+
+    def _wait_address_search_ready(timeout_sec: float = 10.0) -> bool:
+        end_at = time.time() + timeout_sec
+        stable_ok_count = 0
+
+        while time.time() < end_at:
+            try:
+                if is_unexpected_digital_sales_home(d):
+                    return False
+
+                has_title = d(text="주소입력").exists or d(textContains="주소입력").exists
+                has_search = d(text="검색").exists or d(textContains="검색").exists
+                edit = _find_top_widest_edittext(0.05, 0.25)
+
+                if has_title and has_search and edit is not None:
+                    stable_ok_count += 1
+                    if stable_ok_count >= 2:
+                        print("✅ [ready_sign] 주소 검색 화면 준비 완료")
+                        time.sleep(0.4)
+                        return True
+                else:
+                    stable_ok_count = 0
+            except Exception:
+                stable_ok_count = 0
+
+            time.sleep(0.4)
+
+        print("❌ [ready_sign] 주소 검색 화면 준비 실패")
+        return False
+
+    def _search_basic_address(address_basic: str) -> bool:
+        if not address_basic:
+            return _abort(f"전자서명 중단: 기본주소 값 없음 / 고객={job['name']}")
+
+        if not _wait_address_search_ready(timeout_sec=10.0):
+            return False
+
+        edit = _find_top_widest_edittext(0.05, 0.25)
+        if edit is None:
+            return _abort(f"전자서명 중단: 주소 검색 입력칸 미검출 / 고객={job['name']}")
+
+        print(f"🔎 [ready_sign] 기본주소 검색: {address_basic}")
+        ok = type_into_edittext(d, edit, address_basic)
+        if not ok:
+            return _abort(f"전자서명 중단: 기본주소 검색어 입력 실패 / 고객={job['name']} / 기본주소={address_basic}")
+
+        time.sleep(0.5)
+
+        try:
+            if d(text="검색").exists:
+                click_text_center(d, "검색", 0.05, 0.25)
+            elif d(textContains="검색").exists:
+                d(textContains="검색").click()
+            else:
+                d.press("enter")
+        except Exception:
+            return _abort(f"전자서명 중단: 주소 검색 실행 실패 / 고객={job['name']}")
+
+        time.sleep(3.0)
+        return True
+
+    def _wait_postcode_result_ready(timeout_sec: float = 12.0, expected_zipcode: str = "") -> bool:
+        end_at = time.time() + timeout_sec
+        expect_zip = normalize_digits(expected_zipcode or "")
+
+        while time.time() < end_at:
+            try:
+                if is_unexpected_digital_sales_home(d):
+                    return False
+
+                has_title = d(text="우편번호찾기").exists or d(textContains="우편번호찾기").exists
+
+                has_zip = False
+                if expect_zip:
+                    items = _collect_visible_text_items(0.05, 0.55)
+                    for it in items:
+                        if normalize_digits(it["text"]) == expect_zip:
+                            has_zip = True
+                            break
+
+                if has_title or has_zip:
+                    print("✅ [ready_sign] 우편번호 검색 결과 화면 준비 완료")
+                    time.sleep(0.4)
+                    return True
+            except Exception:
+                pass
+
+            time.sleep(0.4)
+
+        print("❌ [ready_sign] 우편번호 검색 결과 화면 준비 실패")
+        return False
+
+    def _normalize_addr_cmp(s: str) -> str:
+        return re.sub(r"\s+", "", str(s or "")).strip()
+
+    def _click_matching_postcode_result(zipcode: str, address_basic: str) -> bool:
+        expected_zip = normalize_digits(zipcode or "")
+        expected_addr = _normalize_addr_cmp(address_basic or "")
+
+        if not expected_zip:
+            return _abort(f"전자서명 중단: 우편번호 값 없음 / 고객={job['name']}")
+
+        if not expected_addr:
+            return _abort(f"전자서명 중단: 기본주소 값 없음 / 고객={job['name']}")
+
+        items = _collect_visible_text_items(0.05, 0.60)
+
+        zip_found = False
+        for it in items:
+            if normalize_digits(it["text"]) == expected_zip:
+                zip_found = True
+                break
+
+        if not zip_found:
+            return _abort(f"전자서명 중단: 주소 검색 결과 우편번호 불일치 / 고객={job['name']} / 기대우편번호={expected_zip}")
+
+        matched = []
+        seen_text = set()
+
+        for it in items:
+            raw = str(it["text"] or "").strip()
+            norm = _normalize_addr_cmp(raw)
+
+            if not norm:
+                continue
+            if norm in seen_text:
+                continue
+            if any(skip in norm for skip in ["우편번호", "도로명", "지번", "영문보기", "지도", "Poweredby", "카카오"]):
+                continue
+
+            if norm == expected_addr or norm.startswith(expected_addr):
+                matched.append(it)
+                seen_text.add(norm)
+
+        if len(matched) == 0:
+            return _abort(
+                f"전자서명 중단: 주소 검색 결과 기본주소 불일치 / 고객={job['name']} / 기대주소={address_basic} / 기대우편번호={expected_zip}"
+            )
+
+        if len(matched) > 1:
+            return _abort(
+                f"전자서명 중단: 주소 검색 결과 기본주소 후보 다중 / 고객={job['name']} / 기대주소={address_basic} / 후보수={len(matched)}"
+            )
+
+        target = matched[0]
+        left, top, right, bottom = target["bounds"]
+        cx = (left + right) // 2
+        cy = (top + bottom) // 2
+
+        d.click(cx, cy)
+        time.sleep(2.0)
+        print(f"✅ [ready_sign] 우편번호/기본주소 일치 결과 선택 완료: {target['text']}")
+        return True
+
+    def _wait_address_detail_ready(timeout_sec: float = 12.0) -> bool:
+        end_at = time.time() + timeout_sec
+        stable_ok_count = 0
+
+        while time.time() < end_at:
+            try:
+                if is_unexpected_digital_sales_home(d):
+                    return False
+
+                has_title = d(text="주소입력").exists or d(textContains="주소입력").exists
+                has_detail = d(textContains="상세주소").exists or d(textContains="필수 입력").exists
+                has_submit = d(text="주소 입력").exists or d(textContains="주소 입력").exists
+
+                if has_title and has_detail and has_submit:
+                    stable_ok_count += 1
+                    if stable_ok_count >= 2:
+                        print("✅ [ready_sign] 주소 상세입력 화면 준비 완료")
+                        time.sleep(0.4)
+                        return True
+                else:
+                    stable_ok_count = 0
+            except Exception:
+                stable_ok_count = 0
+
+            time.sleep(0.4)
+
+        print("❌ [ready_sign] 주소 상세입력 화면 준비 실패")
+        return False
+
+    def _fill_detail_address_and_submit(address_detail: str) -> bool:
+        if not address_detail:
+            return _abort(f"전자서명 중단: 상세주소 값 없음 / 고객={job['name']}")
+
+        if not _wait_address_detail_ready(timeout_sec=12.0):
+            return False
+
+        edit = _find_lowest_widest_edittext(0.20, 0.80)
+        if edit is None:
+            return _abort(f"전자서명 중단: 상세주소 입력칸 미검출 / 고객={job['name']}")
+
+        ok = type_into_edittext(d, edit, address_detail)
+        if not ok:
+            return _abort(f"전자서명 중단: 상세주소 입력 실패 / 고객={job['name']} / 상세주소={address_detail}")
+
+        time.sleep(0.8)
+
+        try:
+            if d(text="주소 입력").exists:
+                ok_click = click_text_center(d, "주소 입력", 0.45, 0.98)
+            elif d(textContains="주소 입력").exists:
+                d(textContains="주소 입력").click()
+                ok_click = True
+            else:
+                ok_click = False
+        except Exception:
+            ok_click = False
+
+        if not ok_click:
+            return _abort(f"전자서명 중단: 상세주소 주소입력 버튼 클릭 실패 / 고객={job['name']}")
+
+        time.sleep(2.0)
+        print(f"✅ [ready_sign] 상세주소 입력 및 주소 등록 완료: {address_detail}")
+        return True
+
+    def _fill_install_info_address(phone11: str, zipcode: str, address_basic: str, address_detail: str) -> bool:
+        if not _wait_install_info_ready(timeout_sec=12.0):
+            return _abort(f"전자서명 중단: 설치정보 화면 진입 실패 / 고객={job['name']}")
+
+        _dismiss_existing_install_info_popup_if_open()
+
+        if not _fill_install_phone(phone11):
+            return False
+
+        if not _click_install_address_input_button():
+            return _abort(f"전자서명 중단: 설치정보 주소 입력 버튼 클릭 실패 / 고객={job['name']}")
+
+        if not _wait_address_management_ready(timeout_sec=10.0):
+            return _abort(f"전자서명 중단: 주소지 관리 화면 진입 실패 / 고객={job['name']}")
+
+        if not _click_new_address_add():
+            return _abort(f"전자서명 중단: 새 주소지 추가 버튼 클릭 실패 / 고객={job['name']}")
+
+        if not _search_basic_address(address_basic):
+            return False
+
+        if not _wait_postcode_result_ready(timeout_sec=12.0, expected_zipcode=zipcode):
+            return _abort(f"전자서명 중단: 우편번호 검색 결과 화면 진입 실패 / 고객={job['name']}")
+
+        if not _click_matching_postcode_result(zipcode, address_basic):
+            return False
+
+        if not _fill_detail_address_and_submit(address_detail):
+            return False
+
+        if not _wait_install_info_ready(timeout_sec=12.0):
+            return _abort(f"전자서명 중단: 주소 입력 후 설치정보 화면 복귀 실패 / 고객={job['name']}")
+
+        print(f"✅ [ready_sign] 설치정보 주소 입력 완료: {job['name']}")
+        return True
+
     def _open_payment_method_and_click_add(account_raw: str) -> bool:
         if not _wait_payment_info_ready(timeout_sec=12.0):
             return _abort(f"전자서명 중단: 결제정보 선택 화면 진입 실패 / 고객={job['name']}")
@@ -2628,12 +3349,11 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
                 if not _wait_payment_method_add_page_ready(timeout_sec=10.0):
                     return _abort(f"전자서명 중단: 결제수단 추가 화면 진입 실패 / 고객={job['name']}")
 
-                if not _click_bank_transfer_tab_if_needed(account_raw):
-                    return _abort(f"전자서명 중단: 카드/은행 탭 선택 실패 / 고객={job['name']} / 원본결제정보={account_raw}")
-
                 if _is_card_expiry_like(account_raw):
-                    print(f"✅ [ready_sign] 카드이체 탭 유지 완료: {job['name']}")
-                    return True
+                    return _abort(f"전자서명 중단: 카드이체 결제정보는 아직 미구현 / 고객={job['name']} / 원본결제정보={account_raw}")
+
+                if not _click_bank_transfer_tab_if_needed(account_raw):
+                    return _abort(f"전자서명 중단: 은행이체 탭 선택 실패 / 고객={job['name']} / 원본결제정보={account_raw}")
 
                 if not _open_bank_picker():
                     return _abort(f"전자서명 중단: 은행입력 선택창 열기 실패 / 고객={job['name']} / 원본결제정보={account_raw}")
@@ -2641,7 +3361,22 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
                 if not _choose_bank_from_picker(account_raw):
                     return False
 
-                print(f"✅ [ready_sign] 은행이체 탭 + 은행 선택 완료: {job['name']}")
+                if not _fill_bank_account_number(account_raw):
+                    return False
+
+                if not _click_payment_method_submit():
+                    return _abort(f"전자서명 중단: 결제수단 추가하기 버튼 클릭 실패 / 고객={job['name']}")
+
+                if not _handle_payment_add_error_popup_if_any():
+                    return False
+
+                if not _wait_payment_info_ready(timeout_sec=10.0):
+                    return _abort(f"전자서명 중단: 결제수단 추가 후 결제정보 선택 화면 복귀 실패 / 고객={job['name']}")
+
+                if not _click_payment_info_next():
+                    return _abort(f"전자서명 중단: 결제정보 선택 화면 다음 버튼 클릭 실패 / 고객={job['name']}")
+
+                print(f"✅ [ready_sign] 결제수단 추가 완료 후 결제정보 다음 클릭 완료: {job['name']}")
                 return True
 
             time.sleep(1.0)
@@ -2782,6 +3517,10 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
         discount_raw = (job.get("discount_raw") or "").strip()
         amount_raw = (job.get("amount_raw") or "").strip()
         account_raw = (job.get("account") or "").strip()
+        phone11 = (job.get("phone11") or "").strip()
+        zipcode = (job.get("zipcode") or "").strip()
+        address_basic = (job.get("address_basic") or job.get("address") or "").strip()
+        address_detail = (job.get("address_detail") or "").strip()
 
         if not search_model:
             return _abort(f"전자서명 중단: 모달 모델명 추출 실패 / 고객={job['name']}")
@@ -2803,6 +3542,18 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
 
         if not account_raw:
             return _abort(f"전자서명 중단: 모달 결제정보 추출 실패 / 고객={job['name']} / 모델={search_model}")
+
+        if not phone11:
+            return _abort(f"전자서명 중단: 모달 연락처 추출 실패 / 고객={job['name']} / 모델={search_model}")
+
+        if not zipcode:
+            return _abort(f"전자서명 중단: 모달 우편번호 추출 실패 / 고객={job['name']} / 모델={search_model}")
+
+        if not address_basic:
+            return _abort(f"전자서명 중단: 모달 기본주소 추출 실패 / 고객={job['name']} / 모델={search_model}")
+
+        if not address_detail:
+            return _abort(f"전자서명 중단: 모달 상세주소 추출 실패 / 고객={job['name']} / 모델={search_model}")
 
         if not d(text="주문 이어서 하기").exists:
             return _abort(f"전자서명 중단: 주문 이어서 하기 버튼 미검출 / 고객={job['name']}")
@@ -2843,12 +3594,15 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
         if not _open_payment_method_and_click_add(account_raw):
             return False
 
+        if not _fill_install_info_address(phone11, zipcode, address_basic, address_detail):
+            return False
+
         SIGN_IN_PROGRESS = True
         sign_started.add(job["phone11"])
         notify(
-            f"전자서명 결제정보 단계 완료: {job['name']} / {job['phone11']} / 결제정보={account_raw} / 모델={search_model} / 색상={color_raw} / 관리={manage_raw} / 약정={contract_raw}"
+            f"전자서명 결제정보/설치주소 단계 완료: {job['name']} / {job['phone11']} / 결제정보={account_raw} / 우편번호={zipcode} / 기본주소={address_basic} / 상세주소={address_detail}"
         )
-        print(f"✅ [ready_sign] 상품검색/색상/렌탈/관리/약정/할인검증/결제정보추가/은행선택 완료: {job['name']}")
+        print(f"✅ [ready_sign] 상품검색/색상/렌탈/관리/약정/할인검증/결제정보추가/계좌번호입력/설치주소입력 완료: {job['name']}")
         return True
 
     return False
