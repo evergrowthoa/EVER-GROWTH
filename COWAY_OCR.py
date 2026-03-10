@@ -675,8 +675,6 @@ def enter_order_status(d) -> bool:
         except Exception:
             cnt = 0
 
-        print(f"🔍 [enter_order_status] 일반주문 텍스트 개수: {cnt}")
-
         target = None
         best_top = 10**9
 
@@ -689,16 +687,13 @@ def enter_order_status(d) -> bool:
                 right = int(b.get("right", 0))
                 bottom = int(b.get("bottom", 0))
 
-                print(f"   - 일반주문[{i}] bounds=({left},{top},{right},{bottom})")
-
                 if top < 300 or top > 1400:
                     continue
 
                 if top < best_top:
                     best_top = top
                     target = (left, top, right, bottom)
-            except Exception as e:
-                print(f"⚠️ [enter_order_status] 일반주문 후보 확인 실패[{i}]: {e}")
+            except Exception:
                 continue
 
         if target is None:
@@ -709,7 +704,6 @@ def enter_order_status(d) -> bool:
         cy = (top + bottom) // 2
         w, h = d.window_size()
 
-        # ✅ 빨간 박스 영역: 화면 오른쪽 84%~88% 부근
         candidate_points = [
             (int(w * 0.84), cy),
             (int(w * 0.86), cy),
@@ -732,39 +726,34 @@ def enter_order_status(d) -> bool:
                 filtered_points.append((x, y))
                 tried.add(key)
 
-        for idx, (x, y) in enumerate(filtered_points, start=1):
-            print(f"🎯 [enter_order_status] 건수/화살표 박스 클릭 시도 {idx}/{len(filtered_points)} ({x}, {y})")
+        for x, y in filtered_points:
             d.click(x, y)
             time.sleep(1.2)
 
             if d(text="주문현황").exists:
                 ensure_general_tab(d, force_click=True)
                 time.sleep(0.4)
-                print("✅ [enter_order_status] 건수/화살표 박스 클릭으로 주문현황 진입 성공")
+                print("✅ [enter_order_status] 주문현황 진입 성공")
                 return True
 
-        # fallback 1: 빨간 박스보다 약간 왼쪽
         fallback_x1 = int(w * 0.82)
-        print(f"🔁 [enter_order_status] 건수영역 왼쪽 fallback 클릭 ({fallback_x1}, {cy})")
         d.click(fallback_x1, cy)
         time.sleep(1.2)
 
         if d(text="주문현황").exists:
             ensure_general_tab(d, force_click=True)
             time.sleep(0.4)
-            print("✅ [enter_order_status] 건수영역 왼쪽 fallback으로 주문현황 진입 성공")
+            print("✅ [enter_order_status] 주문현황 진입 성공")
             return True
 
-        # fallback 2: 빨간 박스보다 약간 오른쪽
         fallback_x2 = int(w * 0.90)
-        print(f"🔁 [enter_order_status] 건수영역 오른쪽 fallback 클릭 ({fallback_x2}, {cy})")
         d.click(fallback_x2, cy)
         time.sleep(1.2)
 
         if d(text="주문현황").exists:
             ensure_general_tab(d, force_click=True)
             time.sleep(0.4)
-            print("✅ [enter_order_status] 건수영역 오른쪽 fallback으로 주문현황 진입 성공")
+            print("✅ [enter_order_status] 주문현황 진입 성공")
             return True
 
         print("❌ [enter_order_status] 주문현황 진입 실패")
@@ -938,7 +927,6 @@ def find_search_edittext(d):
 
         edits = d(className="android.widget.EditText")
         cnt = edits.count
-        print(f"🔍 [find_search_edittext] EditText 개수: {cnt}")
 
         for i in range(cnt):
             try:
@@ -950,8 +938,6 @@ def find_search_edittext(d):
                 bottom = int(b.get("bottom", 0))
                 bw = right - left
 
-                print(f"   - EditText[{i}] bounds=({left},{top},{right},{bottom}) width={bw}")
-
                 if top < int(h * 0.10) or top > int(h * 0.42):
                     continue
 
@@ -961,18 +947,11 @@ def find_search_edittext(d):
                 if bw > best_w:
                     best_w = bw
                     best = e
-            except Exception as e:
-                print(f"⚠️ [find_search_edittext] EditText[{i}] 확인 실패: {e}")
+            except Exception:
                 continue
 
         if best is None:
-            print("❌ [find_search_edittext] 상단 검색영역 후보를 찾지 못함")
-        else:
-            try:
-                b = best.info.get("bounds", {})
-                print(f"✅ [find_search_edittext] 선택된 bounds={b}")
-            except Exception:
-                pass
+            print("❌ [find_search_edittext] 상단 검색 입력칸을 찾지 못함")
 
         return best
     except Exception as e:
@@ -1165,6 +1144,7 @@ def wait_until_order_status_ready(d, timeout_sec: float = 8.0) -> str:
 
     end_at = time.time() + timeout_sec
     stable_ok_count = 0
+    loading_log_count = 0
 
     while time.time() < end_at:
         try:
@@ -1178,7 +1158,9 @@ def wait_until_order_status_ready(d, timeout_sec: float = 8.0) -> str:
                 continue
 
             if _is_loading_overlay():
-                print("⏳ [wait_until_order_status_ready] 주문현황 로딩중...")
+                loading_log_count += 1
+                if loading_log_count % 3 == 1:
+                    print("⏳ [wait_until_order_status_ready] 주문현황 로딩중...")
                 stable_ok_count = 0
                 time.sleep(0.40)
                 continue
@@ -3199,6 +3181,22 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
         print("❌ [ready_sign] 주소 검색 화면 준비 실패")
         return False
 
+    def _build_address_search_query(address_basic: str) -> str:
+        s = str(address_basic or "").strip()
+        if not s:
+            return ""
+
+        s = re.sub(r"\([^)]*\)", "", s).strip()
+        s = re.sub(r"\s+", " ", s).strip()
+
+        if "," in s:
+            s = s.split(",")[0].strip()
+
+        if len(s) > 30:
+            s = s[:30].rstrip()
+
+        return s
+
     def _search_basic_address(address_basic: str) -> bool:
         if not address_basic:
             return _abort(f"전자서명 중단: 기본주소 값 없음 / 고객={job['name']}")
@@ -3210,10 +3208,14 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
         if edit is None:
             return _abort(f"전자서명 중단: 주소 검색 입력칸 미검출 / 고객={job['name']}")
 
-        print(f"🔎 [ready_sign] 기본주소 검색: {address_basic}")
-        ok = type_into_edittext(d, edit, address_basic)
+        search_query = _build_address_search_query(address_basic)
+        if not search_query:
+            return _abort(f"전자서명 중단: 주소 검색용 기본주소 가공 실패 / 고객={job['name']} / 기본주소={address_basic}")
+
+        print(f"🔎 [ready_sign] 기본주소 검색: {search_query}")
+        ok = type_into_edittext(d, edit, search_query)
         if not ok:
-            return _abort(f"전자서명 중단: 기본주소 검색어 입력 실패 / 고객={job['name']} / 기본주소={address_basic}")
+            return _abort(f"전자서명 중단: 기본주소 검색어 입력 실패 / 고객={job['name']} / 기본주소={search_query}")
 
         time.sleep(0.5)
 
@@ -3262,11 +3264,30 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
         return False
 
     def _normalize_addr_cmp(s: str) -> str:
-        return re.sub(r"\s+", "", str(s or "")).strip()
+        s = str(s or "")
+        s = re.sub(r"\s+", "", s)
+        s = re.sub(r"\([^)]*\)", "", s)
+        s = s.replace(",", "")
+        return s.strip()
+
+    def _extract_addr_road_base(s: str) -> str:
+        s = str(s or "").strip()
+        if not s:
+            return ""
+
+        if "(" in s:
+            s = s.split("(", 1)[0].strip()
+
+        if "," in s:
+            s = s.split(",", 1)[0].strip()
+
+        s = re.sub(r"\s+", "", s)
+        return s.strip()
 
     def _click_matching_postcode_result(zipcode: str, address_basic: str) -> bool:
         expected_zip = normalize_digits(zipcode or "")
         expected_addr = _normalize_addr_cmp(address_basic or "")
+        expected_road = _extract_addr_road_base(address_basic or "")
 
         if not expected_zip:
             return _abort(f"전자서명 중단: 우편번호 값 없음 / 고객={job['name']}")
@@ -3285,42 +3306,54 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
         if not zip_found:
             return _abort(f"전자서명 중단: 주소 검색 결과 우편번호 불일치 / 고객={job['name']} / 기대우편번호={expected_zip}")
 
-        matched = []
-        seen_text = set()
+        best_item = None
+        best_score = 0
 
         for it in items:
             raw = str(it["text"] or "").strip()
             norm = _normalize_addr_cmp(raw)
+            road = _extract_addr_road_base(raw)
 
             if not norm:
                 continue
-            if norm in seen_text:
-                continue
+
             if any(skip in norm for skip in ["우편번호", "도로명", "지번", "영문보기", "지도", "Poweredby", "카카오"]):
                 continue
 
-            if norm == expected_addr or norm.startswith(expected_addr):
-                matched.append(it)
-                seen_text.add(norm)
+            score = 0
 
-        if len(matched) == 0:
+            if expected_road and road:
+                if road == expected_road:
+                    score = 120
+                elif road.startswith(expected_road):
+                    score = 110
+                elif expected_road.startswith(road):
+                    score = 100
+
+            if score == 0:
+                if norm == expected_addr:
+                    score = 95
+                elif norm.startswith(expected_addr):
+                    score = 90
+                elif expected_addr.startswith(norm):
+                    score = 85
+
+            if score > best_score:
+                best_score = score
+                best_item = it
+
+        if best_item is None or best_score <= 0:
             return _abort(
                 f"전자서명 중단: 주소 검색 결과 기본주소 불일치 / 고객={job['name']} / 기대주소={address_basic} / 기대우편번호={expected_zip}"
             )
 
-        if len(matched) > 1:
-            return _abort(
-                f"전자서명 중단: 주소 검색 결과 기본주소 후보 다중 / 고객={job['name']} / 기대주소={address_basic} / 후보수={len(matched)}"
-            )
-
-        target = matched[0]
-        left, top, right, bottom = target["bounds"]
+        left, top, right, bottom = best_item["bounds"]
         cx = (left + right) // 2
         cy = (top + bottom) // 2
 
         d.click(cx, cy)
         time.sleep(2.0)
-        print(f"✅ [ready_sign] 우편번호/기본주소 일치 결과 선택 완료: {target['text']}")
+        print(f"✅ [ready_sign] 우편번호/기본주소 일치 결과 선택 완료: {best_item['text']}")
         return True
 
     def _wait_address_detail_ready(timeout_sec: float = 12.0) -> bool:
@@ -3551,7 +3584,7 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
         matched_badge = None
 
         for idx, badge in enumerate(ready_badges, start=1):
-            print(f"✅ [ready_sign] 인증완료 후보 확인 {idx}/{len(ready_badges)}: bounds={badge['bounds']}")
+            print(f"✅ [ready_sign] 인증완료 후보 확인 {idx}/{len(ready_badges)}")
 
             ok_open = open_detail_by_status_badge(d, badge)
             if not ok_open:
