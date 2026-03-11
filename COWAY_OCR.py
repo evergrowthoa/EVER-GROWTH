@@ -7,6 +7,7 @@ import time
 import re
 import os
 import base64
+import shutil
 import subprocess
 import sqlite3
 import threading
@@ -14,6 +15,8 @@ import queue
 import traceback
 import tkinter as tk
 from tkinter import ttk
+
+import uiautomator2 as u2
 
 import uiautomator2 as u2
 BUILD_ID = "COWAY_OCR_BUILD_2026-03-05_006"
@@ -1043,10 +1046,133 @@ def connect_emulator():
     d.implicitly_wait(5.0)
     return d
 
+_ADB_EXE_CACHE = ""
+ADB_DEVICE = None
+
+def connect_emulator():
+    global ADB_DEVICE
+    d = u2.connect(ADB_SERIAL)
+    d.implicitly_wait(5.0)
+    ADB_DEVICE = d
+    return d
+
+def _resolve_adb_executable() -> str:
+    candidates = []
+
+    for env_key in ["ADB_EXE", "ADB_PATH"]:
+        v = str(os.environ.get(env_key) or "").strip().strip('"')
+        if v:
+            candidates.append(v)
+
+    for cmd in ["adb", "adb.exe"]:
+        found = shutil.which(cmd)
+        if found:
+            candidates.append(found)
+
+    sdk_roots = [
+        str(os.environ.get("ANDROID_SDK_ROOT") or "").strip(),
+        str(os.environ.get("ANDROID_HOME") or "").strip(),
+        os.path.join(str(os.environ.get("LOCALAPPDATA") or "").strip(), "Android", "Sdk"),
+        os.path.join(os.path.expanduser("~"), "AppData", "Local", "Android", "Sdk"),
+    ]
+
+    for root in sdk_roots:
+        if not root:
+            continue
+        candidates.append(os.path.join(root, "platform-tools", "adb.exe"))
+        candidates.append(os.path.join(root, "platform-tools", "adb"))
+
+    seen = set()
+    normalized = []
+
+    for c in candidates:
+        cc = str(c or "").strip().strip('"')
+        if not cc:
+            continue
+        cc = os.path.normpath(cc)
+        if cc in seen:
+            continue
+        seen.add(cc)
+        normalized.append(cc)
+
+    for path in normalized:
+        if os.path.isfile(path):
+            return path
+
+    return ""
+
+def _normalize_u2_shell_result(res):
+    output = ""
+    exit_code = 0
+
+    if hasattr(res, "output"):
+        output = str(getattr(res, "output") or "").strip()
+        exit_code = getattr(res, "exit_code", 0)
+    elif isinstance(res, tuple):
+        if len(res) >= 1:
+            output = str(res[0] or "").strip()
+        if len(res) >= 2:
+            try:
+                exit_code = int(res[1])
+            except Exception:
+                exit_code = 0 if str(res[1]).strip() in ["", "0", "None"] else 1
+    else:
+        output = str(res or "").strip()
+        exit_code = 0
+
+    ok = (exit_code in [0, None, "0"])
+    return ok, output, ""
+
+def _uia2_shell_run(args, timeout_sec: float = 10.0):
+    global ADB_DEVICE
+
+    if ADB_DEVICE is None:
+        return False, "", "uiautomator2 device not ready"
+
+    arg_list = [str(a) for a in list(args)]
+    last_err = ""
+
+    try:
+        res = ADB_DEVICE.shell(arg_list, timeout=timeout_sec)
+        ok, out, err = _normalize_u2_shell_result(res)
+        if ok:
+            return True, out, ""
+        last_err = out or err or "uiautomator2 shell non-zero"
+    except TypeError:
+        pass
+    except Exception as e:
+        last_err = str(e)
+
+    try:
+        res = ADB_DEVICE.shell(" ".join(arg_list))
+        ok, out, err = _normalize_u2_shell_result(res)
+        if ok:
+            return True, out, ""
+        last_err = out or err or last_err or "uiautomator2 shell non-zero"
+    except Exception as e:
+        if last_err:
+            last_err = f"{last_err} / {e}"
+        else:
+            last_err = str(e)
+
+    return False, "", last_err or "uiautomator2 shell failed"
+
 def adb_run(args, timeout_sec: float = 10.0):
+    global _ADB_EXE_CACHE
+
+    ok, out, err = _uia2_shell_run(args, timeout_sec=timeout_sec)
+    if ok:
+        return ok, out, err
+
+    if not _ADB_EXE_CACHE:
+        _ADB_EXE_CACHE = _resolve_adb_executable()
+
+    if not _ADB_EXE_CACHE:
+        return False, "", f"uiautomator2 shell 실패 / adb.exe 경로도 찾지 못함 / {err}"
+
     try:
         result = subprocess.run(
-            ["adb", "-s", ADB_SERIAL] + list(args),
+            [_ADB_EXE_CACHE, "-s", ADB_SERIAL] + [str(a) for a in list(args)],
             capture_output=True,
             text=True,
             encoding="utf-8",
