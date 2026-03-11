@@ -6,6 +6,8 @@ from selenium.webdriver.chrome.options import Options
 import time
 import re
 import os
+import base64
+import subprocess
 import sqlite3
 import threading
 import queue
@@ -14,7 +16,6 @@ import tkinter as tk
 from tkinter import ttk
 
 import uiautomator2 as u2
-
 BUILD_ID = "COWAY_OCR_BUILD_2026-03-05_006"
 print("✅ BUILD:", BUILD_ID)
 
@@ -1041,6 +1042,69 @@ def connect_emulator():
     d = u2.connect(ADB_SERIAL)
     d.implicitly_wait(5.0)
     return d
+
+def adb_run(args, timeout_sec: float = 10.0):
+    try:
+        result = subprocess.run(
+            ["adb", "-s", ADB_SERIAL] + list(args),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            timeout=timeout_sec,
+        )
+        return (
+            result.returncode == 0,
+            (result.stdout or "").strip(),
+            (result.stderr or "").strip(),
+        )
+    except Exception as e:
+        return False, "", str(e)
+
+def ensure_adb_keyboard_ime() -> bool:
+    ok, out, err = adb_run(["shell", "ime", "set", "com.android.adbkeyboard/.AdbIME"], timeout_sec=8.0)
+    if not ok:
+        print("⚠️ [adb_keyboard] ime set 실패:", err or out)
+        return False
+    time.sleep(0.4)
+    return True
+
+def adb_keyboard_clear_text() -> bool:
+    ok, out, err = adb_run(["shell", "am", "broadcast", "-a", "ADB_CLEAR_TEXT"], timeout_sec=8.0)
+    if not ok:
+        print("⚠️ [adb_keyboard] clear_text 실패:", err or out)
+        return False
+    time.sleep(0.4)
+    return True
+
+def adb_keyboard_input_text(raw_text: str) -> bool:
+    raw_text = str(raw_text or "")
+    try:
+        msg_b64 = base64.b64encode(raw_text.encode("utf-8")).decode("ascii")
+    except Exception as e:
+        print("⚠️ [adb_keyboard] base64 인코딩 실패:", e)
+        return False
+
+    ok, out, err = adb_run(
+        ["shell", "am", "broadcast", "-a", "ADB_INPUT_B64", "--es", "msg", msg_b64],
+        timeout_sec=10.0
+    )
+    if ok:
+        time.sleep(0.8)
+        return True
+
+    print("⚠️ [adb_keyboard] ADB_INPUT_B64 실패:", err or out)
+
+    ok2, out2, err2 = adb_run(
+        ["shell", "am", "broadcast", "-a", "ADB_INPUT_TEXT", "--es", "msg", raw_text],
+        timeout_sec=10.0
+    )
+    if ok2:
+        time.sleep(0.8)
+        return True
+
+    print("⚠️ [adb_keyboard] ADB_INPUT_TEXT 실패:", err2 or out2)
+    return False
 
 def click_text_center(d, txt: str, y_min_ratio: float = 0.0, y_max_ratio: float = 1.0) -> bool:
     try:
@@ -4320,6 +4384,8 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
             return None
 
     def _handle_input_method_picker_if_open() -> bool:
+        ensure_adb_keyboard_ime()
+
         picker_open = False
 
         for kw in ["입력 방법 선택", "입력방법선택"]:
@@ -4331,7 +4397,7 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
                 pass
 
         if not picker_open:
-            return False
+            return True
 
         print("⚠️ [ready_sign] 입력 방법 선택 팝업 감지 → AdbKeyboard 선택")
 
@@ -4340,6 +4406,7 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
                 if d(text=kw).exists:
                     d(text=kw).click()
                     time.sleep(0.8)
+                    ensure_adb_keyboard_ime()
                     return True
             except Exception:
                 pass
@@ -4348,6 +4415,7 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
                 if d(textContains=kw).exists:
                     d(textContains=kw).click()
                     time.sleep(0.8)
+                    ensure_adb_keyboard_ime()
                     return True
             except Exception:
                 pass
@@ -4362,6 +4430,12 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
             return False
 
         try:
+            edit.click()
+            time.sleep(0.35)
+        except Exception:
+            pass
+
+        try:
             b = edit.info.get("bounds", {})
             left = int(b.get("left", 0))
             top = int(b.get("top", 0))
@@ -4370,20 +4444,16 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
 
             x_points = [
                 left + max(40, int((right - left) * 0.18)),
-                left + max(80, int((right - left) * 0.28)),
-                left + max(120, int((right - left) * 0.40)),
+                left + max(80, int((right - left) * 0.32)),
+                left + max(120, int((right - left) * 0.45)),
             ]
             y = (top + bottom) // 2
 
             for x in x_points:
                 d.click(int(x), int(y))
-                time.sleep(0.45)
+                time.sleep(0.30)
 
-                focused = _find_focused_edittext()
-                if focused is not None and _is_detail_address_candidate(focused):
-                    return True
-
-            return False
+            return True
         except Exception:
             return False
 
@@ -4460,41 +4530,6 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
         return False
 
     def _fill_detail_address_and_submit(address_detail: str) -> bool:
-        def _norm_spaces_only(s: str) -> str:
-            s = str(s or "")
-            s = re.sub(r"\s+", "", s)
-            return s.strip()
-
-        def _norm_digits_only(s: str) -> str:
-            s = str(s or "")
-            s = re.sub(r"\s+", "", s)
-            s = re.sub(r"[^0-9]", "", s)
-            return s.strip()
-
-        def _is_digit_style_detail(s: str) -> bool:
-            raw = str(s or "").strip()
-            if not raw:
-                return False
-            only_digits = _norm_digits_only(raw)
-            only_text = re.sub(r"[0-9\-\s]", "", raw)
-            return bool(only_digits) and only_text == ""
-
-        def _detail_value_matches(expected: str, actual: str) -> bool:
-            expected_raw = str(expected or "").strip()
-            actual_raw = str(actual or "").strip()
-
-            if actual_raw == expected_raw:
-                return True
-
-            if _norm_spaces_only(actual_raw) == _norm_spaces_only(expected_raw):
-                return True
-
-            if _is_digit_style_detail(expected_raw):
-                if _norm_digits_only(actual_raw) == _norm_digits_only(expected_raw):
-                    return True
-
-            return False
-
         if not address_detail:
             return _abort(f"전자서명 중단: 상세주소 값 없음 / 고객={job['name']}")
 
@@ -4514,59 +4549,33 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
                 time.sleep(0.8)
                 continue
 
-            _handle_input_method_picker_if_open()
-            time.sleep(0.3)
-
-            focused = _find_focused_edittext()
-            if focused is None or (not _is_detail_address_candidate(focused)):
-                if not _click_detail_address_field(candidate):
-                    if attempt == 2:
-                        return _abort(f"전자서명 중단: 상세주소칸 포커스 실패 / 고객={job['name']}")
-                    time.sleep(0.8)
-                    continue
-                focused = _find_focused_edittext()
-
-            if focused is None or (not _is_detail_address_candidate(focused)):
+            if not _handle_input_method_picker_if_open():
                 if attempt == 2:
-                    return _abort(f"전자서명 중단: 상세주소칸 포커스 실패 / 고객={job['name']}")
+                    return _abort(f"전자서명 중단: AdbKeyboard 선택 실패 / 고객={job['name']}")
                 time.sleep(0.8)
                 continue
 
-            current_text = ""
-
-            try:
-                focused.set_text("")
-                time.sleep(0.3)
-            except Exception:
-                pass
-
-            try:
-                focused.set_text(expected_raw)
-                time.sleep(1.0)
-            except Exception as e:
-                print(f"⚠️ [detail_address] set_text 실패: {e}")
+            if not _click_detail_address_field(candidate):
                 if attempt == 2:
-                    return _abort(
-                        f"전자서명 중단: 상세주소 입력 실패 / 고객={job['name']} / 기대={expected_raw} / 현재={current_text}"
-                    )
+                    return _abort(f"전자서명 중단: 상세주소칸 재클릭 실패 / 고객={job['name']}")
                 time.sleep(0.8)
                 continue
 
-            focused_after = _find_focused_edittext()
-            if focused_after is not None and _is_detail_address_candidate(focused_after):
-                current_text = _read_edit_obj_text(focused_after)
-            else:
-                current_text = _read_edit_obj_text(focused)
+            time.sleep(0.4)
 
-            print(f"🔍 [detail_address] set_text 결과: '{current_text}'")
+            adb_keyboard_clear_text()
+            time.sleep(0.2)
 
-            if not _detail_value_matches(expected_raw, current_text):
+            ok_input = adb_keyboard_input_text(expected_raw)
+            if not ok_input:
                 if attempt == 2:
-                    return _abort(
-                        f"전자서명 중단: 상세주소 입력 실패 / 고객={job['name']} / 기대={expected_raw} / 현재={current_text}"
-                    )
+                    return _abort(f"전자서명 중단: 상세주소 AdbKeyboard 입력 실패 / 고객={job['name']} / 기대={expected_raw}")
                 time.sleep(0.8)
                 continue
+
+            refind = _find_detail_address_edittext()
+            current_text = _read_edit_obj_text(refind if refind is not None else candidate)
+            print(f"🔍 [detail_address] adb_keyboard 결과: '{current_text}'")
 
             ok_click = _click_address_submit_button()
             if not ok_click:
@@ -4575,7 +4584,7 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
                 time.sleep(0.8)
                 continue
 
-            time.sleep(1.2)
+            time.sleep(1.5)
 
             if not _is_address_detail_screen_now():
                 if _wait_install_info_ready(timeout_sec=4.0):
