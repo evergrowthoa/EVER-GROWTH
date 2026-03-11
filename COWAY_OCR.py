@@ -1750,7 +1750,17 @@ def get_status_badges_in_results(d, target_status: str = ""):
     ✅ 검색 결과 리스트에서 화면에 보이는 상태 배지들을 위에서부터 수집
     target_status="인증완료" 처럼 주면 해당 상태만 수집
     """
-    status_texts = [target_status] if target_status else ["인증완료", "인증입력", "서명입력", "주문확정", "주문삭제", "주문불가"]
+    status_texts = [target_status] if target_status else [
+        "인증완료",
+        "설치입력",
+        "결제입력",
+        "할인입력",
+        "인증입력",
+        "서명입력",
+        "주문확정",
+        "주문삭제",
+        "주문불가",
+    ]
 
     try:
         w, h = d.window_size()
@@ -2057,7 +2067,7 @@ def check_one_job_status_by_search(d, job: dict) -> str:
 
     return ""
 
-def try_open_ready_sign_detail(d, job: dict) -> bool:
+def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료") -> bool:
     """
     ✅ 인증완료 상세 진입
     - 검색 결과에서 '인증완료' 핑크 배지 클릭
@@ -4626,6 +4636,52 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
 
         print(f"✅ [ready_sign] 설치정보 주소 입력 완료: {job['name']}")
         return True
+
+    def _try_resume_from_current_screen(
+        account_raw: str,
+        discount_raw: str,
+        amount_raw: str,
+        phone11: str,
+        zipcode: str,
+        address_basic: str,
+        address_detail: str,
+    ):
+        if _wait_install_info_ready(timeout_sec=3.0):
+            print(f"✅ [ready_sign] 주문 이어서 하기 후 설치정보 화면 진입 감지: {job['name']}")
+            return _fill_install_info_address(phone11, zipcode, address_basic, address_detail)
+
+        if _wait_payment_info_ready(timeout_sec=3.0):
+            print(f"✅ [ready_sign] 주문 이어서 하기 후 결제정보 선택 화면 진입 감지: {job['name']}")
+
+            if not account_raw:
+                return _abort(f"전자서명 중단: 모달 결제정보 추출 실패 / 고객={job['name']}")
+
+            if not _open_payment_method_and_click_add(account_raw):
+                return False
+
+            return _fill_install_info_address(phone11, zipcode, address_basic, address_detail)
+
+        if _wait_discount_page_ready(timeout_sec=3.0):
+            print(f"✅ [ready_sign] 주문 이어서 하기 후 할인정보 입력 화면 진입 감지: {job['name']}")
+
+            if not discount_raw:
+                return _abort(f"전자서명 중단: 모달 할인 추출 실패 / 고객={job['name']}")
+
+            if not amount_raw:
+                return _abort(f"전자서명 중단: 모달 금액 추출 실패 / 고객={job['name']}")
+
+            if not account_raw:
+                return _abort(f"전자서명 중단: 모달 결제정보 추출 실패 / 고객={job['name']}")
+
+            if not _verify_discount_and_amount_then_next(discount_raw, amount_raw):
+                return False
+
+            if not _open_payment_method_and_click_add(account_raw):
+                return False
+
+            return _fill_install_info_address(phone11, zipcode, address_basic, address_detail)
+
+        return None
     
     def _open_payment_method_and_click_add(account_raw: str) -> bool:
         if not _wait_payment_info_ready(timeout_sec=12.0):
@@ -4746,20 +4802,25 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
             return False
 
         time.sleep(0.80)
-        ready_badges = get_status_badges_in_results(d, target_status="인증완료")
-        print(f"🧾 [ready_sign] 인증완료 후보 수: {len(ready_badges)}")
 
-        if not ready_badges:
+        target_status = str(entry_status or "").strip()
+        if not target_status:
+            target_status = "인증완료"
+
+        target_badges = get_status_badges_in_results(d, target_status=target_status)
+        print(f"🧾 [ready_sign] {target_status} 후보 수: {len(target_badges)}")
+
+        if not target_badges:
             return False
 
         matched_badge = None
 
-        for idx, badge in enumerate(ready_badges, start=1):
-            print(f"✅ [ready_sign] 인증완료 후보 확인 {idx}/{len(ready_badges)}")
+        for idx, badge in enumerate(target_badges, start=1):
+            print(f"✅ [ready_sign] {target_status} 후보 확인 {idx}/{len(target_badges)}")
 
             ok_open = open_detail_by_status_badge(d, badge)
             if not ok_open:
-                print(f"⚠️ [ready_sign] 인증완료 후보 열기 실패 {idx}/{len(ready_badges)}")
+                print(f"⚠️ [ready_sign] {target_status} 후보 열기 실패 {idx}/{len(target_badges)}")
                 continue
 
             time.sleep(0.90)
@@ -4772,11 +4833,11 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
                 return False
 
             if match_detail_by_name_phone(d, job["name"], job["phone11"]):
-                print(f"✅ [ready_sign] 상세 고객명/전화번호 매칭 성공 {idx}/{len(ready_badges)}")
+                print(f"✅ [ready_sign] 상세 고객명/전화번호 매칭 성공 {idx}/{len(target_badges)}")
                 matched_badge = badge
                 break
 
-            print(f"⚠️ [ready_sign] 상세 불일치 {idx}/{len(ready_badges)} → 다음 인증완료 후보 확인")
+            print(f"⚠️ [ready_sign] 상세 불일치 {idx}/{len(target_badges)} → 다음 {target_status} 후보 확인")
             print(f"   - 기대 이름/번호: {job['name']} / {job['phone11']}")
             back_to_order_status(d)
 
@@ -4806,8 +4867,8 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
             continue
 
         if matched_badge is None:
-            notify(f"인증완료 후보 {len(ready_badges)}개 모두 전화번호 불일치: {job['name']} / {job['phone11']}")
-            print("❌ [ready_sign] 인증완료 후보 전체 확인했지만 전화번호 일치 없음")
+            notify(f"{target_status} 후보 {len(target_badges)}개 모두 전화번호 불일치: {job['name']} / {job['phone11']}")
+            print(f"❌ [ready_sign] {target_status} 후보 전체 확인했지만 전화번호 일치 없음")
             return False
 
         search_model = (job.get("model_name") or job.get("product_name") or "").strip()
@@ -4863,6 +4924,28 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
 
         if is_unexpected_digital_sales_home(d):
             return _abort(f"전자서명 중단: 주문 이어서 하기 클릭 후 홈이탈 / 고객={job['name']}")
+
+        resume_result = _try_resume_from_current_screen(
+            account_raw=account_raw,
+            discount_raw=discount_raw,
+            amount_raw=amount_raw,
+            phone11=phone11,
+            zipcode=zipcode,
+            address_basic=address_basic,
+            address_detail=address_detail,
+        )
+
+        if resume_result is True:
+            SIGN_IN_PROGRESS = True
+            sign_started.add(job["phone11"])
+            notify(
+                f"전자서명 재진행 완료: {job['name']} / {job['phone11']} / 시작상태={target_status}"
+            )
+            print(f"✅ [ready_sign] 현재 단계({target_status})부터 재진행 완료: {job['name']}")
+            return True
+
+        if resume_result is False:
+            return False
 
         if not _search_product_by_model(search_model):
             return _abort(f"전자서명 중단: 모델 검색 실패 / 고객={job['name']} / 모델={search_model}")
@@ -5156,15 +5239,15 @@ def emulator_main_loop():
 
                 print(f"🧾 상태체크: {j['name']} / {j['phone11']} => {st or 'NONE'} (다음 {interval}s)")
 
-                if st == "인증완료":
+                if st in ["인증완료", "할인입력", "결제입력", "설치입력"]:
                     LAST_STOP_REASON = ""
-                    ok = try_open_ready_sign_detail(d, j)
+                    ok = try_open_ready_sign_detail(d, j, entry_status=st)
                     if ok:
                         db_mark_done(phone11)
                         with jobs_lock:
                             auth_sent_jobs.pop(phone11, None)
                         sign_started.add(phone11)
-                        notify(f"✅ 인증완료 확인(매칭 OK): {j['name']} / {j['phone11']} → 결제정보 추가/은행선택 단계까지 완료")
+                        notify(f"✅ 진행 재개/완료: {j['name']} / {j['phone11']} / 시작상태={st}")
                     else:
                         if LAST_STOP_REASON:
                             db_mark_hold(phone11, LAST_STOP_REASON)
