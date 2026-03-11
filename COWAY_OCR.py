@@ -4309,7 +4309,79 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
         except Exception:
             return None
 
-    def _click_detail_address_field(edit) -> bool:
+    def _find_detail_address_prompt_obj():
+        keywords = ["상세주소", "아파트명", "건물명", "필수 입력", "필수입력"]
+
+        for kw in keywords:
+            try:
+                if d(textContains=kw).exists:
+                    return d(textContains=kw)
+            except Exception:
+                pass
+
+        return None
+
+    def _handle_input_method_picker_if_open() -> bool:
+        picker_open = False
+
+        for kw in ["입력 방법 선택", "입력방법선택"]:
+            try:
+                if d(text=kw).exists or d(textContains=kw).exists:
+                    picker_open = True
+                    break
+            except Exception:
+                pass
+
+        if not picker_open:
+            return False
+
+        print("⚠️ [ready_sign] 입력 방법 선택 팝업 감지 → AdbKeyboard 선택")
+
+        for kw in ["AdbKeyboard", "ADBKeyboard", "Adb Keyboard"]:
+            try:
+                if d(text=kw).exists:
+                    d(text=kw).click()
+                    time.sleep(0.8)
+                    return True
+            except Exception:
+                pass
+
+            try:
+                if d(textContains=kw).exists:
+                    d(textContains=kw).click()
+                    time.sleep(0.8)
+                    return True
+            except Exception:
+                pass
+
+        return False
+
+    def _click_detail_address_field(edit=None) -> bool:
+        prompt = _find_detail_address_prompt_obj()
+        if prompt is not None:
+            try:
+                b = prompt.info.get("bounds", {})
+                left = int(b.get("left", 0))
+                top = int(b.get("top", 0))
+                right = int(b.get("right", 0))
+                bottom = int(b.get("bottom", 0))
+                cx = (left + right) // 2
+                cy = (top + bottom) // 2
+
+                d.click(cx, cy)
+                time.sleep(0.45)
+                d.click(cx, cy)
+                time.sleep(0.45)
+                return True
+            except Exception:
+                pass
+
+        if edit is None:
+            edit = _find_detail_address_edittext()
+
+        if edit is None:
+            return False
+
         try:
             b = edit.info.get("bounds", {})
             left = int(b.get("left", 0))
@@ -4317,32 +4389,37 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
             right = int(b.get("right", 0))
             bottom = int(b.get("bottom", 0))
 
-            x_points = [
-                left + max(25, int((right - left) * 0.18)),
-                left + max(40, int((right - left) * 0.30)),
-                (left + right) // 2,
-            ]
+            x = left + max(30, int((right - left) * 0.20))
             y = (top + bottom) // 2
 
-            for x in x_points:
-                d.click(int(x), int(y))
-                time.sleep(0.35)
+            d.click(int(x), int(y))
+            time.sleep(0.45)
+            d.click(int(x), int(y))
+            time.sleep(0.45)
             return True
         except Exception:
             return False
 
     def _click_address_submit_button() -> bool:
         try:
+            w, h = d.window_size()
+
             if d(text="주소 입력").exists:
-                ok = click_text_center(d, "주소 입력", 0.70, 0.99)
+                b = d(text="주소 입력").info.get("bounds", {})
+                cy = (int(b.get("top", 0)) + int(b.get("bottom", 0))) // 2
+                d.click(int(w * 0.50), cy)
                 time.sleep(1.2)
-                return ok
+                return True
         except Exception:
             pass
 
         try:
+            w, h = d.window_size()
+
             if d(textContains="주소 입력").exists:
-                d(textContains="주소 입력").click()
+                b = d(textContains="주소 입력").info.get("bounds", {})
+                cy = (int(b.get("top", 0)) + int(b.get("bottom", 0))) // 2
+                d.click(int(w * 0.50), cy)
                 time.sleep(1.2)
                 return True
         except Exception:
@@ -4438,11 +4515,26 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
             if candidate is None:
                 return _abort(f"전자서명 중단: 상세주소 입력칸 미검출 / 고객={job['name']}")
 
-            _click_detail_address_field(candidate)
+            if not _click_detail_address_field(candidate):
+                if attempt == 2:
+                    return _abort(f"전자서명 중단: 상세주소칸 클릭 실패 / 고객={job['name']}")
+                time.sleep(0.8)
+                continue
+
+            _handle_input_method_picker_if_open()
+            time.sleep(0.4)
+
+            if not _click_detail_address_field(candidate):
+                if attempt == 2:
+                    return _abort(f"전자서명 중단: 상세주소칸 재클릭 실패 / 고객={job['name']}")
+                time.sleep(0.8)
+                continue
+
             time.sleep(0.5)
 
-            focused = _find_focused_edittext()
-            target_edit = focused if (focused is not None and _is_detail_address_candidate(focused)) else candidate
+            target_edit = _find_focused_edittext()
+            if target_edit is None:
+                target_edit = candidate
 
             current_text = ""
 
@@ -4464,32 +4556,10 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
                 time.sleep(0.8)
                 continue
 
-            focused_after = _find_focused_edittext()
-            refind = _find_detail_address_edittext()
-
-            visible_values = []
-
-            if focused_after is not None and _is_detail_address_candidate(focused_after):
-                visible_values.append(_read_edit_obj_text(focused_after))
-
-            if refind is not None:
-                visible_values.append(_read_edit_obj_text(refind))
-
-            cleaned_values = []
-            seen = set()
-            for v in visible_values:
-                vv = str(v or "").strip()
-                if vv in seen:
-                    continue
-                seen.add(vv)
-                cleaned_values.append(vv)
-
-            current_text = " | ".join(cleaned_values)
+            current_text = _read_edit_obj_text(target_edit)
             print(f"🔍 [detail_address] set_text 결과: '{current_text}'")
 
-            typed_ok = any(_detail_value_matches(expected_raw, v) for v in cleaned_values)
-
-            if not typed_ok:
+            if not _detail_value_matches(expected_raw, current_text):
                 if attempt == 2:
                     return _abort(
                         f"전자서명 중단: 상세주소 입력 실패 / 고객={job['name']} / 기대={expected_raw} / 현재={current_text}"
@@ -4512,19 +4582,8 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
                     return True
 
             if _is_address_detail_screen_now():
-                refind_after = _find_detail_address_edittext()
-                after_text = _read_edit_obj_text(refind_after) if refind_after is not None else ""
-
-                if _detail_value_matches(expected_raw, after_text):
-                    print(f"⚠️ [ready_sign] 상세주소는 입력됐지만 아직 같은 화면 → 주소 입력 버튼 재시도 {attempt + 1}/3")
-                    time.sleep(1.0)
-                    continue
-
-                if attempt == 2:
-                    return _abort(
-                        f"전자서명 중단: 상세주소가 실제 필드에 반영되지 않음 / 고객={job['name']} / 기대={expected_raw} / 현재={after_text}"
-                    )
-                time.sleep(0.8)
+                print(f"⚠️ [ready_sign] 상세주소 입력 후 아직 같은 화면 → 재시도 {attempt + 1}/3")
+                time.sleep(1.0)
                 continue
 
             if attempt == 2:
