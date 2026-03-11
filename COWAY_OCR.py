@@ -39,6 +39,7 @@ STATUS_AUTH_SENT = "인증발송"
 STATUS_DONE = "완료"
 STATUS_CANCELLED = "취소"
 STATUS_HOLD = "보류"
+STATUS_DELETED = "삭제"
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "coway_jobs.sqlite3")
 
@@ -211,42 +212,89 @@ def db_upsert_job_from_modal(data: dict):
         conn = _db_conn()
         try:
             if existing:
-                conn.execute("""
-                    UPDATE jobs
-                    SET name = ?,
-                        birth = ?,
-                        account = ?,
-                        zipcode = ?,
-                        product_name = ?,
-                        model_name = ?,
-                        color_raw = ?,
-                        address = ?,
-                        address_basic = ?,
-                        address_detail = ?,
-                        manage_raw = ?,
-                        contract_raw = ?,
-                        discount_raw = ?,
-                        amount_raw = ?,
-                        updated_at = ?
-                    WHERE phone11 = ?
-                """, (
-                    payload["name"],
-                    payload["birth"],
-                    payload["account"],
-                    payload["zipcode"],
-                    payload["product_name"],
-                    payload["model_name"],
-                    payload["color_raw"],
-                    payload["address"],
-                    payload["address_basic"],
-                    payload["address_detail"],
-                    payload["manage_raw"],
-                    payload["contract_raw"],
-                    payload["discount_raw"],
-                    payload["amount_raw"],
-                    now,
-                    phone11,
-                ))
+                existing_status = str(existing.get("status") or "").strip()
+
+                if existing_status == STATUS_DELETED:
+                    conn.execute("""
+                        UPDATE jobs
+                        SET name = ?,
+                            birth = ?,
+                            account = ?,
+                            zipcode = ?,
+                            product_name = ?,
+                            model_name = ?,
+                            color_raw = ?,
+                            address = ?,
+                            address_basic = ?,
+                            address_detail = ?,
+                            manage_raw = ?,
+                            contract_raw = ?,
+                            discount_raw = ?,
+                            amount_raw = ?,
+                            status = ?,
+                            auth_sent_at = 0,
+                            next_check_at = 0,
+                            last_check_at = 0,
+                            last_status = '',
+                            last_error = '',
+                            updated_at = ?
+                        WHERE phone11 = ?
+                    """, (
+                        payload["name"],
+                        payload["birth"],
+                        payload["account"],
+                        payload["zipcode"],
+                        payload["product_name"],
+                        payload["model_name"],
+                        payload["color_raw"],
+                        payload["address"],
+                        payload["address_basic"],
+                        payload["address_detail"],
+                        payload["manage_raw"],
+                        payload["contract_raw"],
+                        payload["discount_raw"],
+                        payload["amount_raw"],
+                        STATUS_NEW,
+                        now,
+                        phone11,
+                    ))
+                else:
+                    conn.execute("""
+                        UPDATE jobs
+                        SET name = ?,
+                            birth = ?,
+                            account = ?,
+                            zipcode = ?,
+                            product_name = ?,
+                            model_name = ?,
+                            color_raw = ?,
+                            address = ?,
+                            address_basic = ?,
+                            address_detail = ?,
+                            manage_raw = ?,
+                            contract_raw = ?,
+                            discount_raw = ?,
+                            amount_raw = ?,
+                            updated_at = ?
+                        WHERE phone11 = ?
+                    """, (
+                        payload["name"],
+                        payload["birth"],
+                        payload["account"],
+                        payload["zipcode"],
+                        payload["product_name"],
+                        payload["model_name"],
+                        payload["color_raw"],
+                        payload["address"],
+                        payload["address_basic"],
+                        payload["address_detail"],
+                        payload["manage_raw"],
+                        payload["contract_raw"],
+                        payload["discount_raw"],
+                        payload["amount_raw"],
+                        now,
+                        phone11,
+                    ))
             else:
                 conn.execute("""
                     INSERT INTO jobs (
@@ -415,14 +463,16 @@ def db_apply_manual_status(phone11: str, status_value: str):
 
     now = time.time()
     status_value = str(status_value or "").strip()
-    if status_value not in [STATUS_NEW, STATUS_AUTH_SENT, STATUS_DONE, STATUS_CANCELLED, STATUS_HOLD]:
+    if status_value not in [STATUS_NEW, STATUS_AUTH_SENT, STATUS_DONE, STATUS_CANCELLED, STATUS_HOLD, STATUS_DELETED]:
         return
 
     row = db_get_job(phone11)
     if row is None:
         return
 
-    auth_sent_at = float(row.get("auth_sent_at") or 0)
+    if status_value == STATUS_DELETED:
+        db_soft_delete_job(phone11)
+        return
 
     next_check_at = 0
     if status_value == STATUS_AUTH_SENT:
@@ -452,6 +502,65 @@ def db_apply_manual_status(phone11: str, status_value: str):
             conn.commit()
         finally:
             conn.close()
+
+def db_soft_delete_job(phone11: str):
+    if not phone11:
+        return
+
+    row = db_get_job(phone11)
+    if row is None:
+        return
+
+    now = time.time()
+    stamp = _fmt_ts(now)
+    prev_status = str(row.get("status") or "").strip()
+    prev_last_status = str(row.get("last_status") or "").strip()
+    old_note = str(row.get("note") or "").strip()
+
+    delete_line = f"[삭제이력 {stamp}] 이전상태={prev_status} 마지막상태={prev_last_status}"
+    new_note = delete_line if not old_note else (old_note + "\n" + delete_line)
+
+    with db_lock:
+        conn = _db_conn()
+        try:
+            conn.execute("""
+                UPDATE jobs
+                SET status = ?,
+                    auth_sent_at = 0,
+                    next_check_at = 0,
+                    last_check_at = 0,
+                    last_status = '',
+                    last_error = '',
+                    note = ?,
+                    updated_at = ?
+                WHERE phone11 = ?
+            """, (
+                STATUS_DELETED,
+                new_note,
+                now,
+                phone11,
+            ))
+            conn.commit()
+        finally:
+            conn.close()
+
+    try:
+        queued_new_phones.discard(phone11)
+    except Exception:
+        pass
+
+    try:
+        processed_phones.discard(phone11)
+    except Exception:
+        pass
+
+    try:
+        sign_started.discard(phone11)
+    except Exception:
+        pass
+
+    with jobs_lock:
+        auth_sent_jobs.pop(phone11, None)
 
 def db_resume_job(phone11: str):
     row = db_get_job(phone11)
@@ -577,7 +686,7 @@ def start_record_window_thread():
             ctrl,
             textvariable=status_var,
             state="readonly",
-            values=[STATUS_NEW, STATUS_AUTH_SENT, STATUS_DONE, STATUS_CANCELLED, STATUS_HOLD],
+            values=[STATUS_NEW, STATUS_AUTH_SENT, STATUS_DONE, STATUS_CANCELLED, STATUS_HOLD, STATUS_DELETED],
             width=12
         )
         status_combo.grid(row=0, column=1, padx=4, pady=4, sticky="w")
@@ -676,6 +785,16 @@ def start_record_window_thread():
             sync_runtime_state_from_db()
             _load_selected()
 
+        def _delete():
+            phone11 = _selected_phone()
+            if not phone11:
+                return
+            db_set_note(phone11, note_entry.get().strip())
+            db_soft_delete_job(phone11)
+            clear_stop()
+            sync_runtime_state_from_db()
+            _load_selected()
+
         def _hold():
             phone11 = _selected_phone()
             if not phone11:
@@ -709,9 +828,10 @@ def start_record_window_thread():
         ttk.Button(ctrl, text="상태적용", command=_apply_status).grid(row=0, column=5, padx=4, pady=4)
         ttk.Button(ctrl, text="재개", command=_resume).grid(row=0, column=6, padx=4, pady=4)
         ttk.Button(ctrl, text="취소", command=_cancel).grid(row=0, column=7, padx=4, pady=4)
-        ttk.Button(ctrl, text="보류", command=_hold).grid(row=0, column=8, padx=4, pady=4)
-        ttk.Button(ctrl, text="완료", command=_done).grid(row=0, column=9, padx=4, pady=4)
-        ttk.Button(ctrl, text="다음확인 즉시", command=_force_check).grid(row=0, column=10, padx=4, pady=4)
+        ttk.Button(ctrl, text="삭제", command=_delete).grid(row=0, column=8, padx=4, pady=4)
+        ttk.Button(ctrl, text="보류", command=_hold).grid(row=0, column=9, padx=4, pady=4)
+        ttk.Button(ctrl, text="완료", command=_done).grid(row=0, column=10, padx=4, pady=4)
+        ttk.Button(ctrl, text="다음확인 즉시", command=_force_check).grid(row=0, column=11, padx=4, pady=4)
 
         tree.bind("<<TreeviewSelect>>", _load_selected)
 
@@ -4059,91 +4179,133 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
             pass
         return None
 
-    def _find_detail_address_edittext():
+    def _get_detail_submit_top():
+        try:
+            if d(text="주소 입력").exists:
+                b = d(text="주소 입력").info.get("bounds", {})
+                return int(b.get("top", 0))
+            if d(textContains="주소 입력").exists:
+                b = d(textContains="주소 입력").info.get("bounds", {})
+                return int(b.get("top", 0))
+        except Exception:
+            pass
+        return None
+
+    def _get_address_result_bottom():
+        result_bottom = 0
+        for label in ["우편번호", "도로명", "지번"]:
+            try:
+                objs = d(text=label)
+                cnt = objs.count
+            except Exception:
+                cnt = 0
+
+            for i in range(cnt):
+                try:
+                    b = objs[i].info.get("bounds", {})
+                    bottom = int(b.get("bottom", 0))
+                    if bottom > result_bottom:
+                        result_bottom = bottom
+                except Exception:
+                    continue
+        return result_bottom
+
+    def _get_edit_meta_text(edit_obj):
+        try:
+            info = edit_obj.info or {}
+        except Exception:
+            info = {}
+
+        parts = [
+            str(info.get("text") or ""),
+            str(info.get("hintText") or ""),
+            str(info.get("contentDescription") or ""),
+            str(info.get("resourceName") or ""),
+        ]
+        return " ".join([p for p in parts if p]).strip()
+
+    def _is_detail_address_candidate(edit_obj):
         try:
             w, h = d.window_size()
+            info = edit_obj.info or {}
+            b = info.get("bounds", {})
 
-            submit_top = None
-            try:
-                if d(text="주소 입력").exists:
-                    b = d(text="주소 입력").info.get("bounds", {})
-                    submit_top = int(b.get("top", 0))
-                elif d(textContains="주소 입력").exists:
-                    b = d(textContains="주소 입력").info.get("bounds", {})
-                    submit_top = int(b.get("top", 0))
-            except Exception:
-                submit_top = None
+            left = int(b.get("left", 0))
+            top = int(b.get("top", 0))
+            right = int(b.get("right", 0))
+            bottom = int(b.get("bottom", 0))
+            width = right - left
+            height = bottom - top
+            cy = (top + bottom) // 2
 
-            result_bottom = 0
-            for label in ["우편번호", "도로명", "지번"]:
-                try:
-                    objs = d(text=label)
-                    cnt = objs.count
-                except Exception:
-                    cnt = 0
+            if left < 0 or top < 0 or right <= left or bottom <= top:
+                return False
 
-                for i in range(cnt):
-                    try:
-                        b = objs[i].info.get("bounds", {})
-                        bottom = int(b.get("bottom", 0))
-                        if bottom > result_bottom:
-                            result_bottom = bottom
-                    except Exception:
-                        continue
+            if cy < int(h * 0.22) or cy > int(h * 0.72):
+                return False
 
+            if width < int(w * 0.55):
+                return False
+
+            if height < 45:
+                return False
+
+            result_bottom = _get_address_result_bottom()
+            if result_bottom and top <= result_bottom + 12:
+                return False
+
+            submit_top = _get_detail_submit_top()
+            if submit_top is not None and bottom >= submit_top:
+                return False
+
+            return True
+        except Exception:
+            return False
+
+    def _find_detail_address_edittext():
+        try:
+            submit_top = _get_detail_submit_top()
             edits = d(className="android.widget.EditText")
             try:
                 cnt = edits.count
             except Exception:
                 cnt = 0
 
-            best = None
-            best_score = None
+            best_hint = None
+            best_hint_score = None
+            best_geo = None
+            best_geo_score = None
 
             for i in range(cnt):
                 try:
                     e = edits[i]
+                    if not _is_detail_address_candidate(e):
+                        continue
+
                     info = e.info or {}
                     b = info.get("bounds", {})
-                    left = int(b.get("left", 0))
-                    top = int(b.get("top", 0))
-                    right = int(b.get("right", 0))
                     bottom = int(b.get("bottom", 0))
-                    width = right - left
-                    height = bottom - top
-                    cy = (top + bottom) // 2
-
-                    if left < 0 or top < 0 or right <= left or bottom <= top:
-                        continue
-
-                    if cy < int(h * 0.22) or cy > int(h * 0.72):
-                        continue
-
-                    if width < int(w * 0.55):
-                        continue
-
-                    if height < 45:
-                        continue
-
-                    if result_bottom and top <= result_bottom + 12:
-                        continue
-
-                    if submit_top is not None and bottom >= submit_top:
-                        continue
 
                     score = 999999
                     if submit_top is not None:
                         score = abs(submit_top - bottom)
-                    else:
-                        score = h - bottom
 
-                    if best is None or score < best_score:
-                        best = e
-                        best_score = score
+                    meta_norm = re.sub(r"\s+", "", _get_edit_meta_text(e))
+
+                    if any(k in meta_norm for k in ["상세주소", "필수입력", "아파트명", "건물명"]):
+                        if best_hint is None or score < best_hint_score:
+                            best_hint = e
+                            best_hint_score = score
+                    else:
+                        if best_geo is None or score < best_geo_score:
+                            best_geo = e
+                            best_geo_score = score
                 except Exception:
                     continue
 
-            return best
+            if best_hint is not None:
+                return best_hint
+            return best_geo
         except Exception:
             return None
 
@@ -4233,7 +4395,7 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
             s = re.sub(r"\s+", "", s)
             return s.strip()
 
-        def _norm_digits_like(s: str) -> str:
+        def _norm_digits_only(s: str) -> str:
             s = str(s or "")
             s = re.sub(r"\s+", "", s)
             s = re.sub(r"[^0-9]", "", s)
@@ -4243,7 +4405,7 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
             raw = str(s or "").strip()
             if not raw:
                 return False
-            only_digits = _norm_digits_like(raw)
+            only_digits = _norm_digits_only(raw)
             only_text = re.sub(r"[0-9\-\s]", "", raw)
             return bool(only_digits) and only_text == ""
 
@@ -4258,7 +4420,7 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
                 return True
 
             if _is_digit_style_detail(expected_raw):
-                if _norm_digits_like(actual_raw) == _norm_digits_like(expected_raw):
+                if _norm_digits_only(actual_raw) == _norm_digits_only(expected_raw):
                     return True
 
             return False
@@ -4279,9 +4441,8 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
             _click_detail_address_field(candidate)
             time.sleep(0.5)
 
-            target_edit = _find_focused_edittext()
-            if target_edit is None:
-                target_edit = candidate
+            focused = _find_focused_edittext()
+            target_edit = focused if (focused is not None and _is_detail_address_candidate(focused)) else candidate
 
             current_text = ""
 
@@ -4294,18 +4455,6 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
             try:
                 target_edit.set_text(expected_raw)
                 time.sleep(1.0)
-
-                focused_after = _find_focused_edittext()
-                if focused_after is not None:
-                    current_text = _read_edit_obj_text(focused_after)
-                else:
-                    refind = _find_detail_address_edittext()
-                    if refind is not None:
-                        current_text = _read_edit_obj_text(refind)
-                    else:
-                        current_text = _read_edit_obj_text(target_edit)
-
-                print(f"🔍 [detail_address] set_text 결과: '{current_text}'")
             except Exception as e:
                 print(f"⚠️ [detail_address] set_text 실패: {e}")
                 if attempt == 2:
@@ -4315,7 +4464,32 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
                 time.sleep(0.8)
                 continue
 
-            if not _detail_value_matches(expected_raw, current_text):
+            focused_after = _find_focused_edittext()
+            refind = _find_detail_address_edittext()
+
+            visible_values = []
+
+            if focused_after is not None and _is_detail_address_candidate(focused_after):
+                visible_values.append(_read_edit_obj_text(focused_after))
+
+            if refind is not None:
+                visible_values.append(_read_edit_obj_text(refind))
+
+            cleaned_values = []
+            seen = set()
+            for v in visible_values:
+                vv = str(v or "").strip()
+                if vv in seen:
+                    continue
+                seen.add(vv)
+                cleaned_values.append(vv)
+
+            current_text = " | ".join(cleaned_values)
+            print(f"🔍 [detail_address] set_text 결과: '{current_text}'")
+
+            typed_ok = any(_detail_value_matches(expected_raw, v) for v in cleaned_values)
+
+            if not typed_ok:
                 if attempt == 2:
                     return _abort(
                         f"전자서명 중단: 상세주소 입력 실패 / 고객={job['name']} / 기대={expected_raw} / 현재={current_text}"
@@ -4338,8 +4512,8 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
                     return True
 
             if _is_address_detail_screen_now():
-                refind = _find_detail_address_edittext()
-                after_text = _read_edit_obj_text(refind) if refind is not None else ""
+                refind_after = _find_detail_address_edittext()
+                after_text = _read_edit_obj_text(refind_after) if refind_after is not None else ""
 
                 if _detail_value_matches(expected_raw, after_text):
                     print(f"⚠️ [ready_sign] 상세주소는 입력됐지만 아직 같은 화면 → 주소 입력 버튼 재시도 {attempt + 1}/3")
