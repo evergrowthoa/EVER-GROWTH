@@ -5,9 +5,13 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 import time
 import re
+import os
+import sqlite3
 import threading
 import queue
 import traceback
+import tkinter as tk
+from tkinter import ttk
 
 import uiautomator2 as u2
 
@@ -30,6 +34,14 @@ ORDER_REENTER_INTERVAL_SEC = 90
 SEARCH_BATCH_PER_CYCLE = 3
 SEARCH_LOOP_SLEEP_SEC = 2.0
 
+STATUS_NEW = "신규"
+STATUS_AUTH_SENT = "인증발송"
+STATUS_DONE = "완료"
+STATUS_CANCELLED = "취소"
+STATUS_HOLD = "보류"
+
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "coway_jobs.sqlite3")
+
 chrome_options = Options()
 chrome_options.add_argument("--start-maximized")
 chrome_options.add_experimental_option("detach", True)
@@ -40,19 +52,29 @@ wait = WebDriverWait(driver, 20)
 auth_q = queue.Queue()
 auth_sent_jobs = {}
 jobs_lock = threading.Lock()
+db_lock = threading.RLock()
 sign_started = set()
+queued_new_phones = set()
 
 SIGN_IN_PROGRESS = False
 STOP_FLAG = False
+LAST_STOP_REASON = ""
 
 def notify(msg: str):
     print("🔔", msg)
 
 def set_stop(reason: str):
-    global STOP_FLAG
+    global STOP_FLAG, LAST_STOP_REASON
     STOP_FLAG = True
+    LAST_STOP_REASON = str(reason or "").strip()
     print("🛑 자동화 중단:", reason)
     notify(reason)
+
+def clear_stop():
+    global STOP_FLAG, LAST_STOP_REASON
+    STOP_FLAG = False
+    LAST_STOP_REASON = ""
+    print("✅ 자동화 정지 해제")
 
 def normalize_digits(s: str) -> str:
     return re.sub(r"\D", "", str(s or ""))
@@ -82,6 +104,622 @@ def compute_check_interval(auth_sent_at: float) -> int:
     if elapsed < 24 * 60 * 60:
         return 1800
     return 3600
+
+def _db_conn():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def _fmt_ts(ts_value):
+    try:
+        ts = float(ts_value or 0)
+        if ts <= 0:
+            return ""
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+    except Exception:
+        return ""
+
+def init_db():
+    with db_lock:
+        conn = _db_conn()
+        try:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS jobs (
+                    phone11 TEXT PRIMARY KEY,
+                    name TEXT DEFAULT '',
+                    birth TEXT DEFAULT '',
+                    account TEXT DEFAULT '',
+                    zipcode TEXT DEFAULT '',
+                    product_name TEXT DEFAULT '',
+                    model_name TEXT DEFAULT '',
+                    color_raw TEXT DEFAULT '',
+                    address TEXT DEFAULT '',
+                    address_basic TEXT DEFAULT '',
+                    address_detail TEXT DEFAULT '',
+                    manage_raw TEXT DEFAULT '',
+                    contract_raw TEXT DEFAULT '',
+                    discount_raw TEXT DEFAULT '',
+                    amount_raw TEXT DEFAULT '',
+                    status TEXT DEFAULT '',
+                    auth_sent_at REAL DEFAULT 0,
+                    next_check_at REAL DEFAULT 0,
+                    last_check_at REAL DEFAULT 0,
+                    last_status TEXT DEFAULT '',
+                    last_error TEXT DEFAULT '',
+                    note TEXT DEFAULT '',
+                    created_at REAL DEFAULT 0,
+                    updated_at REAL DEFAULT 0
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_updated_at ON jobs(updated_at DESC)")
+            conn.commit()
+        finally:
+            conn.close()
+
+def db_get_job(phone11: str):
+    if not phone11:
+        return None
+    with db_lock:
+        conn = _db_conn()
+        try:
+            cur = conn.execute("SELECT * FROM jobs WHERE phone11 = ?", (phone11,))
+            row = cur.fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+def db_list_all_jobs():
+    with db_lock:
+        conn = _db_conn()
+        try:
+            cur = conn.execute("""
+                SELECT *
+                FROM jobs
+                ORDER BY updated_at DESC, created_at DESC, phone11 DESC
+            """)
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+def db_upsert_job_from_modal(data: dict):
+    phone11 = str(data.get("phone11") or "").strip()
+    if not phone11:
+        return None
+
+    now = time.time()
+    existing = db_get_job(phone11)
+
+    payload = {
+        "name": str(data.get("name") or "").strip(),
+        "birth": str(data.get("birth") or "").strip(),
+        "account": str(data.get("account") or "").strip(),
+        "zipcode": str(data.get("zipcode") or "").strip(),
+        "product_name": str(data.get("product_name") or "").strip(),
+        "model_name": str(data.get("model_name") or "").strip(),
+        "color_raw": str(data.get("color_raw") or "").strip(),
+        "address": str(data.get("address") or "").strip(),
+        "address_basic": str(data.get("address_basic") or "").strip(),
+        "address_detail": str(data.get("address_detail") or "").strip(),
+        "manage_raw": str(data.get("manage_raw") or "").strip(),
+        "contract_raw": str(data.get("contract_raw") or "").strip(),
+        "discount_raw": str(data.get("discount_raw") or "").strip(),
+        "amount_raw": str(data.get("amount_raw") or "").strip(),
+    }
+
+    with db_lock:
+        conn = _db_conn()
+        try:
+            if existing:
+                conn.execute("""
+                    UPDATE jobs
+                    SET name = ?,
+                        birth = ?,
+                        account = ?,
+                        zipcode = ?,
+                        product_name = ?,
+                        model_name = ?,
+                        color_raw = ?,
+                        address = ?,
+                        address_basic = ?,
+                        address_detail = ?,
+                        manage_raw = ?,
+                        contract_raw = ?,
+                        discount_raw = ?,
+                        amount_raw = ?,
+                        updated_at = ?
+                    WHERE phone11 = ?
+                """, (
+                    payload["name"],
+                    payload["birth"],
+                    payload["account"],
+                    payload["zipcode"],
+                    payload["product_name"],
+                    payload["model_name"],
+                    payload["color_raw"],
+                    payload["address"],
+                    payload["address_basic"],
+                    payload["address_detail"],
+                    payload["manage_raw"],
+                    payload["contract_raw"],
+                    payload["discount_raw"],
+                    payload["amount_raw"],
+                    now,
+                    phone11,
+                ))
+            else:
+                conn.execute("""
+                    INSERT INTO jobs (
+                        phone11, name, birth, account, zipcode,
+                        product_name, model_name, color_raw,
+                        address, address_basic, address_detail,
+                        manage_raw, contract_raw, discount_raw, amount_raw,
+                        status, auth_sent_at, next_check_at, last_check_at,
+                        last_status, last_error, note, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    phone11,
+                    payload["name"],
+                    payload["birth"],
+                    payload["account"],
+                    payload["zipcode"],
+                    payload["product_name"],
+                    payload["model_name"],
+                    payload["color_raw"],
+                    payload["address"],
+                    payload["address_basic"],
+                    payload["address_detail"],
+                    payload["manage_raw"],
+                    payload["contract_raw"],
+                    payload["discount_raw"],
+                    payload["amount_raw"],
+                    STATUS_NEW,
+                    0,
+                    0,
+                    0,
+                    "",
+                    "",
+                    "",
+                    now,
+                    now,
+                ))
+            conn.commit()
+        finally:
+            conn.close()
+
+    return db_get_job(phone11)
+
+def db_mark_auth_sent(job: dict):
+    phone11 = str(job.get("phone11") or "").strip()
+    if not phone11:
+        return None
+
+    now = time.time()
+    with db_lock:
+        conn = _db_conn()
+        try:
+            conn.execute("""
+                UPDATE jobs
+                SET status = ?,
+                    auth_sent_at = ?,
+                    next_check_at = ?,
+                    last_check_at = 0,
+                    last_status = '',
+                    last_error = '',
+                    updated_at = ?
+                WHERE phone11 = ?
+            """, (
+                STATUS_AUTH_SENT,
+                now,
+                now + 60,
+                now,
+                phone11,
+            ))
+            conn.commit()
+        finally:
+            conn.close()
+
+    return db_get_job(phone11)
+
+def db_update_check_state(phone11: str, last_status: str, next_check_at: float, last_check_at: float):
+    if not phone11:
+        return
+    with db_lock:
+        conn = _db_conn()
+        try:
+            conn.execute("""
+                UPDATE jobs
+                SET last_status = ?,
+                    next_check_at = ?,
+                    last_check_at = ?,
+                    updated_at = ?
+                WHERE phone11 = ?
+            """, (
+                str(last_status or "").strip(),
+                float(next_check_at or 0),
+                float(last_check_at or 0),
+                time.time(),
+                phone11,
+            ))
+            conn.commit()
+        finally:
+            conn.close()
+
+def db_mark_done(phone11: str):
+    if not phone11:
+        return
+    with db_lock:
+        conn = _db_conn()
+        try:
+            conn.execute("""
+                UPDATE jobs
+                SET status = ?,
+                    next_check_at = 0,
+                    last_error = '',
+                    updated_at = ?
+                WHERE phone11 = ?
+            """, (
+                STATUS_DONE,
+                time.time(),
+                phone11,
+            ))
+            conn.commit()
+        finally:
+            conn.close()
+
+def db_mark_hold(phone11: str, reason: str):
+    if not phone11:
+        return
+    with db_lock:
+        conn = _db_conn()
+        try:
+            conn.execute("""
+                UPDATE jobs
+                SET status = ?,
+                    last_error = ?,
+                    updated_at = ?
+                WHERE phone11 = ?
+            """, (
+                STATUS_HOLD,
+                str(reason or "").strip(),
+                time.time(),
+                phone11,
+            ))
+            conn.commit()
+        finally:
+            conn.close()
+
+def db_set_note(phone11: str, note: str):
+    if not phone11:
+        return
+    with db_lock:
+        conn = _db_conn()
+        try:
+            conn.execute("""
+                UPDATE jobs
+                SET note = ?,
+                    updated_at = ?
+                WHERE phone11 = ?
+            """, (
+                str(note or "").strip(),
+                time.time(),
+                phone11,
+            ))
+            conn.commit()
+        finally:
+            conn.close()
+
+def db_apply_manual_status(phone11: str, status_value: str):
+    if not phone11:
+        return
+
+    now = time.time()
+    status_value = str(status_value or "").strip()
+    if status_value not in [STATUS_NEW, STATUS_AUTH_SENT, STATUS_DONE, STATUS_CANCELLED, STATUS_HOLD]:
+        return
+
+    row = db_get_job(phone11)
+    if row is None:
+        return
+
+    auth_sent_at = float(row.get("auth_sent_at") or 0)
+
+    next_check_at = 0
+    if status_value == STATUS_AUTH_SENT:
+        next_check_at = now
+    elif status_value == STATUS_NEW:
+        next_check_at = 0
+
+    with db_lock:
+        conn = _db_conn()
+        try:
+            conn.execute("""
+                UPDATE jobs
+                SET status = ?,
+                    next_check_at = ?,
+                    last_error = CASE WHEN ? IN (?, ?) THEN '' ELSE last_error END,
+                    updated_at = ?
+                WHERE phone11 = ?
+            """, (
+                status_value,
+                next_check_at,
+                status_value,
+                STATUS_NEW,
+                STATUS_AUTH_SENT,
+                now,
+                phone11,
+            ))
+            conn.commit()
+        finally:
+            conn.close()
+
+def db_resume_job(phone11: str):
+    row = db_get_job(phone11)
+    if row is None:
+        return
+    auth_sent_at = float(row.get("auth_sent_at") or 0)
+    if auth_sent_at > 0:
+        db_apply_manual_status(phone11, STATUS_AUTH_SENT)
+        db_force_next_check(phone11)
+    else:
+        db_apply_manual_status(phone11, STATUS_NEW)
+
+def db_force_next_check(phone11: str):
+    if not phone11:
+        return
+    with db_lock:
+        conn = _db_conn()
+        try:
+            conn.execute("""
+                UPDATE jobs
+                SET status = CASE WHEN auth_sent_at > 0 THEN ? ELSE status END,
+                    next_check_at = ?,
+                    updated_at = ?
+                WHERE phone11 = ?
+            """, (
+                STATUS_AUTH_SENT,
+                time.time(),
+                time.time(),
+                phone11,
+            ))
+            conn.commit()
+        finally:
+            conn.close()
+
+def sync_runtime_state_from_db():
+    rows = db_list_all_jobs()
+
+    active_auth = {}
+    active_new = set()
+    active_done = set()
+
+    for row in rows:
+        phone11 = str(row.get("phone11") or "").strip()
+        status = str(row.get("status") or "").strip()
+
+        if not phone11:
+            continue
+
+        if status == STATUS_NEW:
+            active_new.add(phone11)
+            if phone11 not in queued_new_phones:
+                auth_q.put(dict(row))
+                queued_new_phones.add(phone11)
+
+        elif status == STATUS_AUTH_SENT:
+            active_auth[phone11] = dict(row)
+
+        elif status == STATUS_DONE:
+            active_done.add(phone11)
+
+    for p in list(queued_new_phones):
+        if p not in active_new:
+            queued_new_phones.discard(p)
+
+    with jobs_lock:
+        for p in list(auth_sent_jobs.keys()):
+            if p not in active_auth:
+                auth_sent_jobs.pop(p, None)
+        for p, row in active_auth.items():
+            auth_sent_jobs[p] = row
+
+    for p in list(sign_started):
+        if p not in active_done:
+            sign_started.discard(p)
+    for p in active_done:
+        sign_started.add(p)
+
+def start_record_window_thread():
+    def _run():
+        root = tk.Tk()
+        root.title("COWAY 진행기록")
+        root.geometry("1280x620")
+
+        top = ttk.Frame(root, padding=8)
+        top.pack(fill="both", expand=True)
+
+        cols = ("name", "phone11", "status", "last_status", "last_error", "note", "updated_at")
+        tree = ttk.Treeview(top, columns=cols, show="headings", height=20)
+
+        tree.heading("name", text="고객명")
+        tree.heading("phone11", text="연락처")
+        tree.heading("status", text="현재 상태")
+        tree.heading("last_status", text="마지막 상태")
+        tree.heading("last_error", text="마지막 오류")
+        tree.heading("note", text="메모")
+        tree.heading("updated_at", text="수정시각")
+
+        tree.column("name", width=110, anchor="center")
+        tree.column("phone11", width=120, anchor="center")
+        tree.column("status", width=90, anchor="center")
+        tree.column("last_status", width=100, anchor="center")
+        tree.column("last_error", width=280, anchor="w")
+        tree.column("note", width=220, anchor="w")
+        tree.column("updated_at", width=150, anchor="center")
+
+        vsb = ttk.Scrollbar(top, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+
+        tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+
+        top.rowconfigure(0, weight=1)
+        top.columnconfigure(0, weight=1)
+
+        ctrl = ttk.Frame(root, padding=8)
+        ctrl.pack(fill="x")
+
+        selected_phone = {"value": ""}
+
+        ttk.Label(ctrl, text="상태").grid(row=0, column=0, padx=4, pady=4, sticky="w")
+        status_var = tk.StringVar(value=STATUS_NEW)
+        status_combo = ttk.Combobox(
+            ctrl,
+            textvariable=status_var,
+            state="readonly",
+            values=[STATUS_NEW, STATUS_AUTH_SENT, STATUS_DONE, STATUS_CANCELLED, STATUS_HOLD],
+            width=12
+        )
+        status_combo.grid(row=0, column=1, padx=4, pady=4, sticky="w")
+
+        ttk.Label(ctrl, text="메모").grid(row=0, column=2, padx=4, pady=4, sticky="w")
+        note_entry = ttk.Entry(ctrl, width=50)
+        note_entry.grid(row=0, column=3, padx=4, pady=4, sticky="we")
+        ctrl.columnconfigure(3, weight=1)
+
+        def _selected_phone():
+            items = tree.selection()
+            if not items:
+                return ""
+            return str(items[0])
+
+        def _refresh():
+            current_phone = _selected_phone() or selected_phone["value"]
+
+            rows = db_list_all_jobs()
+            existing_ids = set(tree.get_children())
+
+            for row in rows:
+                iid = str(row.get("phone11") or "")
+                values = (
+                    row.get("name") or "",
+                    row.get("phone11") or "",
+                    row.get("status") or "",
+                    row.get("last_status") or "",
+                    row.get("last_error") or "",
+                    row.get("note") or "",
+                    _fmt_ts(row.get("updated_at")),
+                )
+                if iid in existing_ids:
+                    tree.item(iid, values=values)
+                    existing_ids.discard(iid)
+                else:
+                    tree.insert("", "end", iid=iid, values=values)
+
+            for iid in existing_ids:
+                tree.delete(iid)
+
+            if current_phone and tree.exists(current_phone):
+                tree.selection_set(current_phone)
+                tree.focus(current_phone)
+                tree.see(current_phone)
+
+            root.after(2000, _refresh)
+
+        def _load_selected(*args):
+            phone11 = _selected_phone()
+            selected_phone["value"] = phone11
+            if not phone11:
+                return
+            row = db_get_job(phone11)
+            if not row:
+                return
+            status_var.set(row.get("status") or STATUS_NEW)
+            note_entry.delete(0, "end")
+            note_entry.insert(0, row.get("note") or "")
+
+        def _save_note():
+            phone11 = _selected_phone()
+            if not phone11:
+                return
+            db_set_note(phone11, note_entry.get().strip())
+            sync_runtime_state_from_db()
+            _load_selected()
+
+        def _apply_status():
+            phone11 = _selected_phone()
+            if not phone11:
+                return
+            db_set_note(phone11, note_entry.get().strip())
+            db_apply_manual_status(phone11, status_var.get().strip())
+            clear_stop()
+            sync_runtime_state_from_db()
+            _load_selected()
+
+        def _resume():
+            phone11 = _selected_phone()
+            if not phone11:
+                return
+            db_set_note(phone11, note_entry.get().strip())
+            db_resume_job(phone11)
+            clear_stop()
+            sync_runtime_state_from_db()
+            _load_selected()
+
+        def _cancel():
+            phone11 = _selected_phone()
+            if not phone11:
+                return
+            db_set_note(phone11, note_entry.get().strip())
+            db_apply_manual_status(phone11, STATUS_CANCELLED)
+            clear_stop()
+            sync_runtime_state_from_db()
+            _load_selected()
+
+        def _hold():
+            phone11 = _selected_phone()
+            if not phone11:
+                return
+            db_set_note(phone11, note_entry.get().strip())
+            db_apply_manual_status(phone11, STATUS_HOLD)
+            clear_stop()
+            sync_runtime_state_from_db()
+            _load_selected()
+
+        def _done():
+            phone11 = _selected_phone()
+            if not phone11:
+                return
+            db_set_note(phone11, note_entry.get().strip())
+            db_apply_manual_status(phone11, STATUS_DONE)
+            clear_stop()
+            sync_runtime_state_from_db()
+            _load_selected()
+
+        def _force_check():
+            phone11 = _selected_phone()
+            if not phone11:
+                return
+            db_force_next_check(phone11)
+            clear_stop()
+            sync_runtime_state_from_db()
+            _load_selected()
+
+        ttk.Button(ctrl, text="메모저장", command=_save_note).grid(row=0, column=4, padx=4, pady=4)
+        ttk.Button(ctrl, text="상태적용", command=_apply_status).grid(row=0, column=5, padx=4, pady=4)
+        ttk.Button(ctrl, text="재개", command=_resume).grid(row=0, column=6, padx=4, pady=4)
+        ttk.Button(ctrl, text="취소", command=_cancel).grid(row=0, column=7, padx=4, pady=4)
+        ttk.Button(ctrl, text="보류", command=_hold).grid(row=0, column=8, padx=4, pady=4)
+        ttk.Button(ctrl, text="완료", command=_done).grid(row=0, column=9, padx=4, pady=4)
+        ttk.Button(ctrl, text="다음확인 즉시", command=_force_check).grid(row=0, column=10, padx=4, pady=4)
+
+        tree.bind("<<TreeviewSelect>>", _load_selected)
+
+        _refresh()
+        root.mainloop()
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
 
 # ---------------------------
 # Selenium modal
@@ -3412,6 +4050,15 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
         print(f"✅ [ready_sign] 우편번호/기본주소 일치 결과 선택 완료: {best_item['text']}")
         return True
 
+    def _find_focused_edittext():
+        try:
+            obj = d(focused=True, className="android.widget.EditText")
+            if obj.exists:
+                return obj
+        except Exception:
+            pass
+        return None
+
     def _find_detail_address_edittext():
         try:
             w, h = d.window_size()
@@ -3427,8 +4074,28 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
             except Exception:
                 submit_top = None
 
+            result_bottom = 0
+            for label in ["우편번호", "도로명", "지번"]:
+                try:
+                    objs = d(text=label)
+                    cnt = objs.count
+                except Exception:
+                    cnt = 0
+
+                for i in range(cnt):
+                    try:
+                        b = objs[i].info.get("bounds", {})
+                        bottom = int(b.get("bottom", 0))
+                        if bottom > result_bottom:
+                            result_bottom = bottom
+                    except Exception:
+                        continue
+
             edits = d(className="android.widget.EditText")
-            cnt = edits.count
+            try:
+                cnt = edits.count
+            except Exception:
+                cnt = 0
 
             best = None
             best_score = None
@@ -3444,30 +4111,31 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
                     bottom = int(b.get("bottom", 0))
                     width = right - left
                     height = bottom - top
+                    cy = (top + bottom) // 2
 
-                    if top < int(h * 0.16) or bottom > int(h * 0.84):
+                    if left < 0 or top < 0 or right <= left or bottom <= top:
                         continue
 
-                    if width < int(w * 0.45):
+                    if cy < int(h * 0.22) or cy > int(h * 0.72):
                         continue
 
-                    if height < 50:
+                    if width < int(w * 0.55):
                         continue
 
-                    text_now = _read_edit_obj_text(e)
-                    text_norm = re.sub(r"\s+", "", str(text_now or ""))
+                    if height < 45:
+                        continue
 
-                    if "충북" in text_norm or "청주시" in text_norm or "호미로" in text_norm:
+                    if result_bottom and top <= result_bottom + 12:
+                        continue
+
+                    if submit_top is not None and bottom >= submit_top:
                         continue
 
                     score = 999999
-
                     if submit_top is not None:
-                        if bottom >= submit_top:
-                            continue
                         score = abs(submit_top - bottom)
                     else:
-                        score = -top
+                        score = h - bottom
 
                     if best is None or score < best_score:
                         best = e
@@ -3487,11 +4155,16 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
             right = int(b.get("right", 0))
             bottom = int(b.get("bottom", 0))
 
-            cx = (left + right) // 2
-            cy = (top + bottom) // 2
+            x_points = [
+                left + max(25, int((right - left) * 0.18)),
+                left + max(40, int((right - left) * 0.30)),
+                (left + right) // 2,
+            ]
+            y = (top + bottom) // 2
 
-            d.click(cx, cy)
-            time.sleep(0.5)
+            for x in x_points:
+                d.click(int(x), int(y))
+                time.sleep(0.35)
             return True
         except Exception:
             return False
@@ -3555,11 +4228,40 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
         return False
 
     def _fill_detail_address_and_submit(address_detail: str) -> bool:
-        def _norm_detail(s: str) -> str:
+        def _norm_spaces_only(s: str) -> str:
             s = str(s or "")
             s = re.sub(r"\s+", "", s)
-            s = re.sub(r"[^0-9A-Za-z가-힣]", "", s)
             return s.strip()
+
+        def _norm_digits_like(s: str) -> str:
+            s = str(s or "")
+            s = re.sub(r"\s+", "", s)
+            s = re.sub(r"[^0-9]", "", s)
+            return s.strip()
+
+        def _is_digit_style_detail(s: str) -> bool:
+            raw = str(s or "").strip()
+            if not raw:
+                return False
+            only_digits = _norm_digits_like(raw)
+            only_text = re.sub(r"[0-9\-\s]", "", raw)
+            return bool(only_digits) and only_text == ""
+
+        def _detail_value_matches(expected: str, actual: str) -> bool:
+            expected_raw = str(expected or "").strip()
+            actual_raw = str(actual or "").strip()
+
+            if actual_raw == expected_raw:
+                return True
+
+            if _norm_spaces_only(actual_raw) == _norm_spaces_only(expected_raw):
+                return True
+
+            if _is_digit_style_detail(expected_raw):
+                if _norm_digits_like(actual_raw) == _norm_digits_like(expected_raw):
+                    return True
+
+            return False
 
         if not address_detail:
             return _abort(f"전자서명 중단: 상세주소 값 없음 / 고객={job['name']}")
@@ -3567,41 +4269,56 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
         if not _wait_address_detail_ready(timeout_sec=12.0):
             return False
 
-        expected_norm = _norm_detail(address_detail)
+        expected_raw = str(address_detail).strip()
 
         for attempt in range(3):
-            edit = _find_detail_address_edittext()
-            if edit is None:
+            candidate = _find_detail_address_edittext()
+            if candidate is None:
                 return _abort(f"전자서명 중단: 상세주소 입력칸 미검출 / 고객={job['name']}")
 
-            _click_detail_address_field(edit)
-            time.sleep(0.4)
+            _click_detail_address_field(candidate)
+            time.sleep(0.5)
 
-            typed_ok = False
+            target_edit = _find_focused_edittext()
+            if target_edit is None:
+                target_edit = candidate
+
             current_text = ""
 
             try:
-                edit.set_text(address_detail)
-                time.sleep(0.8)
-                current_text = _read_edit_obj_text(edit)
+                target_edit.set_text("")
+                time.sleep(0.3)
+            except Exception:
+                pass
+
+            try:
+                target_edit.set_text(expected_raw)
+                time.sleep(1.0)
+
+                focused_after = _find_focused_edittext()
+                if focused_after is not None:
+                    current_text = _read_edit_obj_text(focused_after)
+                else:
+                    refind = _find_detail_address_edittext()
+                    if refind is not None:
+                        current_text = _read_edit_obj_text(refind)
+                    else:
+                        current_text = _read_edit_obj_text(target_edit)
+
                 print(f"🔍 [detail_address] set_text 결과: '{current_text}'")
-                if expected_norm and _norm_detail(current_text) == expected_norm:
-                    typed_ok = True
             except Exception as e:
                 print(f"⚠️ [detail_address] set_text 실패: {e}")
-
-            if not typed_ok:
-                ok = type_into_edittext(d, edit, address_detail)
-                if ok:
-                    time.sleep(0.8)
-                    current_text = _read_edit_obj_text(edit)
-                    if expected_norm and _norm_detail(current_text) == expected_norm:
-                        typed_ok = True
-
-            if not typed_ok:
                 if attempt == 2:
                     return _abort(
-                        f"전자서명 중단: 상세주소 입력 실패 / 고객={job['name']} / 기대={address_detail} / 현재={current_text}"
+                        f"전자서명 중단: 상세주소 입력 실패 / 고객={job['name']} / 기대={expected_raw} / 현재={current_text}"
+                    )
+                time.sleep(0.8)
+                continue
+
+            if not _detail_value_matches(expected_raw, current_text):
+                if attempt == 2:
+                    return _abort(
+                        f"전자서명 중단: 상세주소 입력 실패 / 고객={job['name']} / 기대={expected_raw} / 현재={current_text}"
                     )
                 time.sleep(0.8)
                 continue
@@ -3613,13 +4330,27 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
                 time.sleep(0.8)
                 continue
 
-            if _wait_install_info_ready(timeout_sec=4.0):
-                print(f"✅ [ready_sign] 상세주소 입력 및 주소 등록 완료: {address_detail}")
-                return True
+            time.sleep(1.2)
+
+            if not _is_address_detail_screen_now():
+                if _wait_install_info_ready(timeout_sec=4.0):
+                    print(f"✅ [ready_sign] 상세주소 입력 및 주소 등록 완료: {address_detail}")
+                    return True
 
             if _is_address_detail_screen_now():
-                print(f"⚠️ [ready_sign] 상세주소 입력 후 아직 같은 화면 → 재시도 {attempt + 1}/3")
-                time.sleep(1.0)
+                refind = _find_detail_address_edittext()
+                after_text = _read_edit_obj_text(refind) if refind is not None else ""
+
+                if _detail_value_matches(expected_raw, after_text):
+                    print(f"⚠️ [ready_sign] 상세주소는 입력됐지만 아직 같은 화면 → 주소 입력 버튼 재시도 {attempt + 1}/3")
+                    time.sleep(1.0)
+                    continue
+
+                if attempt == 2:
+                    return _abort(
+                        f"전자서명 중단: 상세주소가 실제 필드에 반영되지 않음 / 고객={job['name']} / 기대={expected_raw} / 현재={after_text}"
+                    )
+                time.sleep(0.8)
                 continue
 
             if attempt == 2:
@@ -4057,7 +4788,7 @@ def send_auth_request(d, job: dict):
 # emulator loop
 # ---------------------------
 def emulator_main_loop():
-    global SIGN_IN_PROGRESS
+    global SIGN_IN_PROGRESS, LAST_STOP_REASON
 
     if not DO_EMULATOR:
         print("ℹ️ DO_EMULATOR=False")
@@ -4070,6 +4801,8 @@ def emulator_main_loop():
 
     while True:
         try:
+            sync_runtime_state_from_db()
+
             if STOP_FLAG:
                 time.sleep(1.0)
                 continue
@@ -4078,7 +4811,6 @@ def emulator_main_loop():
                 time.sleep(0.8)
                 continue
 
-            # 1) 인증발송 우선
             try:
                 job = auth_q.get_nowait()
             except queue.Empty:
@@ -4086,18 +4818,27 @@ def emulator_main_loop():
 
             if job is not None:
                 try:
+                    phone11 = str(job.get("phone11") or "").strip()
+                    queued_new_phones.discard(phone11)
+
+                    fresh = db_get_job(phone11)
+                    if not fresh or fresh.get("status") != STATUS_NEW:
+                        auth_q.task_done()
+                        time.sleep(0.1)
+                        continue
+
+                    job = dict(fresh)
                     retry = int(job.get("_retry", 0))
+                    LAST_STOP_REASON = ""
+
                     print(f"🚀 인증발송 작업 시작: {job['name']} / {job['phone11']}")
 
                     ok, reason = send_auth_request(d, job)
                     if ok:
-                        now = time.time()
-                        job["auth_sent_at"] = now
-                        job["next_check_at"] = now + 60
-                        job["last_check_at"] = 0.0
-                        job["last_status"] = ""
-                        with jobs_lock:
-                            auth_sent_jobs[job["phone11"]] = job
+                        saved = db_mark_auth_sent(job)
+                        if saved:
+                            with jobs_lock:
+                                auth_sent_jobs[saved["phone11"]] = dict(saved)
                         print(f"✅ 인증발송 성공: {job['name']} / {job['phone11']} (최초 상태체크 60초 후)")
                         notify(f"인증발송 성공: {job['name']} / {job['phone11']} (최초 상태체크 60초 후)")
                     else:
@@ -4106,36 +4847,38 @@ def emulator_main_loop():
                             job["_retry"] = retry
                             print(f"⚠️ 인증발송 재시도 ({retry}/{AUTH_RETRY_MAX}) : {job['name']} / {job['phone11']} ({reason})")
                             auth_q.put(job)
+                            queued_new_phones.add(phone11)
                         else:
+                            db_mark_hold(phone11, f"인증발송 실패: {reason}")
                             if STOP_ON_ERROR:
                                 set_stop(f"인증발송 실패: {job['name']} / {job['phone11']} ({reason})")
                 finally:
-                    auth_q.task_done()
+                    try:
+                        auth_q.task_done()
+                    except Exception:
+                        pass
 
                 time.sleep(0.2)
                 continue
 
-            # 2) 대기목록이 없으면 아무것도 안 함
             with jobs_lock:
                 pending = [j for (p, j) in auth_sent_jobs.items() if p not in sign_started]
+
             if not pending:
                 time.sleep(1.2)
                 continue
 
             now = time.time()
 
-            # 3) 백오프 + 배치 검색 대상 선정
-            pending.sort(key=lambda x: x.get("next_check_at", 0.0))
-            due = [j for j in pending if j.get("next_check_at", 0.0) <= now]
+            pending.sort(key=lambda x: float(x.get("next_check_at") or 0))
+            due = [j for j in pending if float(j.get("next_check_at") or 0) <= now]
             if not due:
                 time.sleep(SEARCH_LOOP_SLEEP_SEC)
                 continue
 
             batch = due[:SEARCH_BATCH_PER_CYCLE]
 
-            # 4) ✅ 실제 체크할 대상이 있을 때만
-            #    앱 종료 없이 "주문현황 X -> 확인 -> 홈 -> 일반주문 재진입" 으로 갱신
-            need_refresh = (now - last_reenter >= ORDER_REENTER_INTERVAL_SEC) or True
+            need_refresh = True
             if need_refresh:
                 ok_refresh = refresh_order_status_by_reenter(d)
                 if not ok_refresh:
@@ -4149,25 +4892,49 @@ def emulator_main_loop():
                 if not auth_q.empty():
                     break
 
+                phone11 = str(j.get("phone11") or "").strip()
+                fresh = db_get_job(phone11)
+                if not fresh:
+                    continue
+
+                if fresh.get("status") in [STATUS_CANCELLED, STATUS_HOLD, STATUS_DONE]:
+                    with jobs_lock:
+                        auth_sent_jobs.pop(phone11, None)
+                    continue
+
+                j = dict(fresh)
+
                 print("🔎 검색 시도:", j["name"])
 
+                LAST_STOP_REASON = ""
                 st = check_one_job_status_by_search(d, j)
-                j["last_check_at"] = time.time()
-                j["last_status"] = st
 
-                interval = compute_check_interval(j["auth_sent_at"])
-                j["next_check_at"] = time.time() + interval
+                last_check_at = time.time()
+                auth_sent_at = float(j.get("auth_sent_at") or 0)
+                interval = compute_check_interval(auth_sent_at) if auth_sent_at > 0 else 120
+                next_check_at = time.time() + interval
 
-                with jobs_lock:
-                    auth_sent_jobs[j["phone11"]] = j
+                db_update_check_state(phone11, st, next_check_at, last_check_at)
+
+                saved = db_get_job(phone11)
+                if saved:
+                    with jobs_lock:
+                        auth_sent_jobs[phone11] = dict(saved)
 
                 print(f"🧾 상태체크: {j['name']} / {j['phone11']} => {st or 'NONE'} (다음 {interval}s)")
 
                 if st == "인증완료":
+                    LAST_STOP_REASON = ""
                     ok = try_open_ready_sign_detail(d, j)
                     if ok:
+                        db_mark_done(phone11)
+                        with jobs_lock:
+                            auth_sent_jobs.pop(phone11, None)
+                        sign_started.add(phone11)
                         notify(f"✅ 인증완료 확인(매칭 OK): {j['name']} / {j['phone11']} → 결제정보 추가/은행선택 단계까지 완료")
                     else:
+                        if LAST_STOP_REASON:
+                            db_mark_hold(phone11, LAST_STOP_REASON)
                         back_to_order_status(d)
 
                 time.sleep(0.6)
@@ -4180,6 +4947,10 @@ def emulator_main_loop():
             if STOP_ON_ERROR:
                 set_stop("에뮬레이터 루프 예외")
             time.sleep(1.0)
+
+init_db()
+sync_runtime_state_from_db()
+start_record_window_thread()
 
 t_emul = threading.Thread(target=emulator_main_loop, daemon=True)
 t_emul.start()
@@ -4259,25 +5030,7 @@ while True:
 
         processed_phones.add(phone11)
 
-        print("\n✅ 신규 고객 감지")
-        print("이름:", name)
-        print("생년월일:", birth)
-        print("전화번호(11):", phone11)
-        print("전화번호 원문:", phone_raw)
-        print("계좌:", account)
-        print("우편번호:", zipcode)
-        print("상품명:", product_name)
-        print("모델명:", model_name)
-        print("색상:", color_raw)
-        print("기본주소:", address_basic)
-        print("상세주소:", address_detail)
-        print("관리:", manage_raw)
-        print("약정:", contract_raw)
-        print("할인:", discount_raw)
-        print("금액:", amount_raw)
-        print("-" * 40)
-
-        auth_q.put({
+        row = db_upsert_job_from_modal({
             "name": name,
             "phone11": phone11,
             "birth": birth,
@@ -4293,9 +5046,34 @@ while True:
             "contract_raw": contract_raw,
             "discount_raw": discount_raw,
             "amount_raw": amount_raw,
-            "_retry": 0,
         })
 
+        current_status = row.get("status", STATUS_NEW) if row else STATUS_NEW
+
+        print("\n✅ 고객 감지/DB 저장")
+        print("이름:", name)
+        print("생년월일:", birth)
+        print("전화번호(11):", phone11)
+        print("전화번호 원문:", phone_raw)
+        print("계좌:", account)
+        print("우편번호:", zipcode)
+        print("상품명:", product_name)
+        print("모델명:", model_name)
+        print("색상:", color_raw)
+        print("기본주소:", address_basic)
+        print("상세주소:", address_detail)
+        print("관리:", manage_raw)
+        print("약정:", contract_raw)
+        print("할인:", discount_raw)
+        print("금액:", amount_raw)
+        print("현재상태:", current_status)
+        print("-" * 40)
+
+        if row and current_status == STATUS_NEW and phone11 not in queued_new_phones:
+            auth_q.put(dict(row))
+            queued_new_phones.add(phone11)
+
+        sync_runtime_state_from_db()
         time.sleep(1.2)
 
     except Exception as e:
