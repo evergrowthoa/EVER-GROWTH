@@ -3555,13 +3555,19 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
         return False
 
     def _fill_detail_address_and_submit(address_detail: str) -> bool:
+        def _norm_detail(s: str) -> str:
+            s = str(s or "")
+            s = re.sub(r"\s+", "", s)
+            s = re.sub(r"[^0-9A-Za-z가-힣]", "", s)
+            return s.strip()
+
         if not address_detail:
             return _abort(f"전자서명 중단: 상세주소 값 없음 / 고객={job['name']}")
 
         if not _wait_address_detail_ready(timeout_sec=12.0):
             return False
 
-        expected_norm = re.sub(r"\s+", "", str(address_detail or ""))
+        expected_norm = _norm_detail(address_detail)
 
         for attempt in range(3):
             edit = _find_detail_address_edittext()
@@ -3569,27 +3575,33 @@ def try_open_ready_sign_detail(d, job: dict) -> bool:
                 return _abort(f"전자서명 중단: 상세주소 입력칸 미검출 / 고객={job['name']}")
 
             _click_detail_address_field(edit)
+            time.sleep(0.4)
 
-            ok = type_into_edittext(d, edit, address_detail)
-            if not ok:
-                if attempt == 2:
-                    return _abort(f"전자서명 중단: 상세주소 입력 실패 / 고객={job['name']} / 상세주소={address_detail}")
+            typed_ok = False
+            current_text = ""
+
+            try:
+                edit.set_text(address_detail)
                 time.sleep(0.8)
-                continue
+                current_text = _read_edit_obj_text(edit)
+                print(f"🔍 [detail_address] set_text 결과: '{current_text}'")
+                if expected_norm and _norm_detail(current_text) == expected_norm:
+                    typed_ok = True
+            except Exception as e:
+                print(f"⚠️ [detail_address] set_text 실패: {e}")
 
-            time.sleep(0.8)
+            if not typed_ok:
+                ok = type_into_edittext(d, edit, address_detail)
+                if ok:
+                    time.sleep(0.8)
+                    current_text = _read_edit_obj_text(edit)
+                    if expected_norm and _norm_detail(current_text) == expected_norm:
+                        typed_ok = True
 
-            edit = _find_detail_address_edittext()
-            if edit is None:
-                return _abort(f"전자서명 중단: 상세주소 입력칸 재검출 실패 / 고객={job['name']}")
-
-            current_text = _read_edit_obj_text(edit)
-            current_norm = re.sub(r"\s+", "", str(current_text or ""))
-
-            if expected_norm and expected_norm not in current_norm:
+            if not typed_ok:
                 if attempt == 2:
                     return _abort(
-                        f"전자서명 중단: 상세주소 입력값 불일치 / 고객={job['name']} / 기대={address_detail} / 현재={current_text}"
+                        f"전자서명 중단: 상세주소 입력 실패 / 고객={job['name']} / 기대={address_detail} / 현재={current_text}"
                     )
                 time.sleep(0.8)
                 continue
