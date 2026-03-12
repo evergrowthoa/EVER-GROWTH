@@ -145,6 +145,14 @@ def init_db():
                     contract_raw TEXT DEFAULT '',
                     discount_raw TEXT DEFAULT '',
                     amount_raw TEXT DEFAULT '',
+                    pickup_request_raw TEXT DEFAULT '',
+                    special_note_raw TEXT DEFAULT '',
+                    third_brand TEXT DEFAULT '',
+                    third_install_mfg TEXT DEFAULT '',
+                    third_product_type TEXT DEFAULT '',
+                    third_product_kind TEXT DEFAULT '',
+                    third_install_shape TEXT DEFAULT '',
+                    third_watermark_no TEXT DEFAULT '',
                     status TEXT DEFAULT '',
                     auth_sent_at REAL DEFAULT 0,
                     next_check_at REAL DEFAULT 0,
@@ -156,6 +164,33 @@ def init_db():
                     updated_at REAL DEFAULT 0
                 )
             """)
+
+            alter_columns = [
+                ("pickup_request_raw", "TEXT DEFAULT ''"),
+                ("special_note_raw", "TEXT DEFAULT ''"),
+                ("third_brand", "TEXT DEFAULT ''"),
+                ("third_install_mfg", "TEXT DEFAULT ''"),
+                ("third_product_type", "TEXT DEFAULT ''"),
+                ("third_product_kind", "TEXT DEFAULT ''"),
+                ("third_install_shape", "TEXT DEFAULT ''"),
+                ("third_watermark_no", "TEXT DEFAULT ''"),
+            ]
+
+            existing_cols = set()
+            cur = conn.execute("PRAGMA table_info(jobs)")
+            for row in cur.fetchall():
+                try:
+                    existing_cols.add(str(row["name"]))
+                except Exception:
+                    try:
+                        existing_cols.add(str(row[1]))
+                    except Exception:
+                        pass
+
+            for col_name, col_def in alter_columns:
+                if col_name not in existing_cols:
+                    conn.execute(f"ALTER TABLE jobs ADD COLUMN {col_name} {col_def}")
+
             conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_updated_at ON jobs(updated_at DESC)")
             conn.commit()
@@ -210,6 +245,14 @@ def db_upsert_job_from_modal(data: dict):
         "contract_raw": str(data.get("contract_raw") or "").strip(),
         "discount_raw": str(data.get("discount_raw") or "").strip(),
         "amount_raw": str(data.get("amount_raw") or "").strip(),
+        "pickup_request_raw": str(data.get("pickup_request_raw") or "").strip(),
+        "special_note_raw": str(data.get("special_note_raw") or "").strip(),
+        "third_brand": str(data.get("third_brand") or "").strip(),
+        "third_install_mfg": str(data.get("third_install_mfg") or "").strip(),
+        "third_product_type": str(data.get("third_product_type") or "").strip(),
+        "third_product_kind": str(data.get("third_product_kind") or "").strip(),
+        "third_install_shape": str(data.get("third_install_shape") or "").strip(),
+        "third_watermark_no": str(data.get("third_watermark_no") or "").strip(),
     }
 
     with db_lock:
@@ -235,6 +278,14 @@ def db_upsert_job_from_modal(data: dict):
                             contract_raw = ?,
                             discount_raw = ?,
                             amount_raw = ?,
+                            pickup_request_raw = ?,
+                            special_note_raw = ?,
+                            third_brand = ?,
+                            third_install_mfg = ?,
+                            third_product_type = ?,
+                            third_product_kind = ?,
+                            third_install_shape = ?,
+                            third_watermark_no = ?,
                             status = ?,
                             auth_sent_at = 0,
                             next_check_at = 0,
@@ -258,6 +309,14 @@ def db_upsert_job_from_modal(data: dict):
                         payload["contract_raw"],
                         payload["discount_raw"],
                         payload["amount_raw"],
+                        payload["pickup_request_raw"],
+                        payload["special_note_raw"],
+                        payload["third_brand"],
+                        payload["third_install_mfg"],
+                        payload["third_product_type"],
+                        payload["third_product_kind"],
+                        payload["third_install_shape"],
+                        payload["third_watermark_no"],
                         STATUS_NEW,
                         now,
                         phone11,
@@ -279,6 +338,14 @@ def db_upsert_job_from_modal(data: dict):
                             contract_raw = ?,
                             discount_raw = ?,
                             amount_raw = ?,
+                            pickup_request_raw = ?,
+                            special_note_raw = ?,
+                            third_brand = ?,
+                            third_install_mfg = ?,
+                            third_product_type = ?,
+                            third_product_kind = ?,
+                            third_install_shape = ?,
+                            third_watermark_no = ?,
                             updated_at = ?
                         WHERE phone11 = ?
                     """, (
@@ -296,6 +363,14 @@ def db_upsert_job_from_modal(data: dict):
                         payload["contract_raw"],
                         payload["discount_raw"],
                         payload["amount_raw"],
+                        payload["pickup_request_raw"],
+                        payload["special_note_raw"],
+                        payload["third_brand"],
+                        payload["third_install_mfg"],
+                        payload["third_product_type"],
+                        payload["third_product_kind"],
+                        payload["third_install_shape"],
+                        payload["third_watermark_no"],
                         now,
                         phone11,
                     ))
@@ -306,9 +381,12 @@ def db_upsert_job_from_modal(data: dict):
                         product_name, model_name, color_raw,
                         address, address_basic, address_detail,
                         manage_raw, contract_raw, discount_raw, amount_raw,
+                        pickup_request_raw, special_note_raw,
+                        third_brand, third_install_mfg, third_product_type,
+                        third_product_kind, third_install_shape, third_watermark_no,
                         status, auth_sent_at, next_check_at, last_check_at,
                         last_status, last_error, note, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     phone11,
                     payload["name"],
@@ -325,6 +403,14 @@ def db_upsert_job_from_modal(data: dict):
                     payload["contract_raw"],
                     payload["discount_raw"],
                     payload["amount_raw"],
+                    payload["pickup_request_raw"],
+                    payload["special_note_raw"],
+                    payload["third_brand"],
+                    payload["third_install_mfg"],
+                    payload["third_product_type"],
+                    payload["third_product_kind"],
+                    payload["third_install_shape"],
+                    payload["third_watermark_no"],
                     STATUS_NEW,
                     0,
                     0,
@@ -978,6 +1064,70 @@ def debug_modal_inputs(modal):
     print("----- [DEBUG] 끝 -----")
 
 def extract_fields_from_modal(modal):
+    def _find_special_note_text():
+        try:
+            ta = modal.find_element(By.XPATH, ".//textarea")
+            if ta and ta.is_displayed():
+                v = (ta.get_attribute("value") or "").strip()
+                if v:
+                    return v
+                v = (ta.text or "").strip()
+                if v:
+                    return v
+        except Exception:
+            pass
+
+        try:
+            box = modal.find_element(
+                By.XPATH,
+                ".//*[contains(normalize-space(.), '특이사항')]/following::*[self::textarea or self::div or self::p][1]"
+            )
+            if box and box.is_displayed():
+                v = (box.get_attribute("value") or "").strip()
+                if v:
+                    return v
+                v = (box.get_attribute("textContent") or "").strip()
+                if v:
+                    return v
+                v = (box.text or "").strip()
+                if v:
+                    return v
+        except Exception:
+            pass
+
+        return ""
+
+    def _is_checkbox_checked_near_label(label_keywords):
+        for kw in label_keywords:
+            xpaths = [
+                f".//*[contains(normalize-space(.), '{kw}')]/preceding::*[self::input[@type='checkbox']][1]",
+                f".//*[contains(normalize-space(.), '{kw}')]/ancestor::*[self::label or self::div or self::td or self::tr][1]//*[self::input[@type='checkbox']][1]",
+                f".//label[contains(normalize-space(.), '{kw}')]//*[self::input[@type='checkbox']][1]",
+                f".//tr[.//*[contains(normalize-space(.), '{kw}')]]//*[self::input[@type='checkbox']][1]",
+            ]
+
+            for xp in xpaths:
+                try:
+                    el = modal.find_element(By.XPATH, xp)
+                    checked = (el.get_attribute("checked") or "").strip().lower()
+                    selected = (el.get_attribute("selected") or "").strip().lower()
+                    aria_checked = (el.get_attribute("aria-checked") or "").strip().lower()
+
+                    if checked in ["true", "checked", "1", "on"]:
+                        return True
+                    if selected in ["true", "selected", "1", "on"]:
+                        return True
+                    if aria_checked in ["true", "checked", "1", "on"]:
+                        return True
+
+                    cls = (el.get_attribute("class") or "").strip().lower()
+                    if "checked" in cls or "selected" in cls:
+                        return True
+                except Exception:
+                    pass
+
+        return False
+
     name = find_input_near_label(modal, ["고객명", "이름", "성명"])
     birth = find_input_near_label(modal, ["생년월일", "주민", "생년"])
     phone_raw = find_input_near_label(modal, ["연락처", "휴대폰번호", "휴대폰", "전화번호", "전화"])
@@ -1018,6 +1168,25 @@ def extract_fields_from_modal(modal):
         ["월요금", "예상월요금", "예상 월요금", "월 렌탈료", "렌탈료", "월금액", "월 금액", "납부금액", "월 납부금액", "금액"]
     )
 
+    third_brand = find_input_near_label(modal, ["타사 브랜드", "타사브랜드"])
+    third_install_mfg = find_input_near_label(
+        modal,
+        ["설치 또는 제조년월", "설치또는제조년월", "설치/제조년월", "설치 년월", "제조년월"]
+    )
+    third_product_type = find_input_near_label(modal, ["제품 타입", "제품타입"])
+    third_product_kind = find_input_near_label(modal, ["제품 종류", "제품종류"])
+    third_install_shape = find_input_near_label(modal, ["설치 형태", "설치형태"])
+    third_watermark_no = find_input_near_label(
+        modal,
+        ["물마크 번호", "물마크번호", "워터마크 번호", "워터마크번호"]
+    )
+
+    pickup_request_raw = ""
+    if _is_checkbox_checked_near_label(["기존 제품 수거", "기존제품수거"]):
+        pickup_request_raw = "기존 제품 수거요청"
+
+    special_note_raw = _find_special_note_text()
+
     phone11 = normalize_phone11_only_010(phone_raw)
 
     return {
@@ -1037,6 +1206,14 @@ def extract_fields_from_modal(modal):
         "contract_raw": (contract_raw or "").strip(),
         "discount_raw": (discount_raw or "").strip(),
         "amount_raw": (amount_raw or "").strip(),
+        "pickup_request_raw": (pickup_request_raw or "").strip(),
+        "special_note_raw": (special_note_raw or "").strip(),
+        "third_brand": (third_brand or "").strip(),
+        "third_install_mfg": (third_install_mfg or "").strip(),
+        "third_product_type": (third_product_type or "").strip(),
+        "third_product_kind": (third_product_kind or "").strip(),
+        "third_install_shape": (third_install_shape or "").strip(),
+        "third_watermark_no": (third_watermark_no or "").strip(),
     }
 # ---------------------------
 # uiautomator2 helpers
@@ -5999,6 +6176,14 @@ while True:
         contract_raw = data.get("contract_raw", "")
         discount_raw = data.get("discount_raw", "")
         amount_raw = data.get("amount_raw", "")
+        pickup_request_raw = data.get("pickup_request_raw", "")
+        special_note_raw = data.get("special_note_raw", "")
+        third_brand = data.get("third_brand", "")
+        third_install_mfg = data.get("third_install_mfg", "")
+        third_product_type = data.get("third_product_type", "")
+        third_product_kind = data.get("third_product_kind", "")
+        third_install_shape = data.get("third_install_shape", "")
+        third_watermark_no = data.get("third_watermark_no", "")
 
         if not phone11:
             print("❌ 전화번호 추출 실패 → 건너뜀")
@@ -6028,6 +6213,14 @@ while True:
             "contract_raw": contract_raw,
             "discount_raw": discount_raw,
             "amount_raw": amount_raw,
+            "pickup_request_raw": pickup_request_raw,
+            "special_note_raw": special_note_raw,
+            "third_brand": third_brand,
+            "third_install_mfg": third_install_mfg,
+            "third_product_type": third_product_type,
+            "third_product_kind": third_product_kind,
+            "third_install_shape": third_install_shape,
+            "third_watermark_no": third_watermark_no,
         })
 
         current_status = row.get("status", STATUS_NEW) if row else STATUS_NEW
@@ -6048,6 +6241,14 @@ while True:
         print("약정:", contract_raw)
         print("할인:", discount_raw)
         print("금액:", amount_raw)
+        print("기존 제품 수거:", pickup_request_raw)
+        print("특이사항:", special_note_raw)
+        print("타사정보-브랜드:", third_brand)
+        print("타사정보-설치/제조년월:", third_install_mfg)
+        print("타사정보-제품타입:", third_product_type)
+        print("타사정보-제품종류:", third_product_kind)
+        print("타사정보-설치형태:", third_install_shape)
+        print("타사정보-물마크번호:", third_watermark_no)
         print("현재상태:", current_status)
         print("-" * 40)
 
