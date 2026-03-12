@@ -1160,7 +1160,13 @@ def _uia2_shell_run(args, timeout_sec: float = 10.0):
 def adb_run(args, timeout_sec: float = 10.0):
     global _ADB_EXE_CACHE
 
-    ok, out, err = _uia2_shell_run(args, timeout_sec=timeout_sec)
+    raw_args = [str(a) for a in list(args)]
+    shell_args = list(raw_args)
+
+    if shell_args and shell_args[0].lower() == "shell":
+        shell_args = shell_args[1:]
+
+    ok, out, err = _uia2_shell_run(shell_args, timeout_sec=timeout_sec)
     if ok:
         return ok, out, err
 
@@ -1172,7 +1178,7 @@ def adb_run(args, timeout_sec: float = 10.0):
 
     try:
         result = subprocess.run(
-            [_ADB_EXE_CACHE, "-s", ADB_SERIAL] + [str(a) for a in list(args)],
+            [_ADB_EXE_CACHE, "-s", ADB_SERIAL] + raw_args,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -4548,40 +4554,140 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
 
         return False
 
+    def _same_edit_bounds(a, b) -> bool:
+        if a is None or b is None:
+            return False
+
+        try:
+            ba = a.info.get("bounds", {})
+            bb = b.info.get("bounds", {})
+
+            return (
+                int(ba.get("left", -1)) == int(bb.get("left", -2))
+                and int(ba.get("top", -1)) == int(bb.get("top", -2))
+                and int(ba.get("right", -1)) == int(bb.get("right", -2))
+                and int(ba.get("bottom", -1)) == int(bb.get("bottom", -2))
+            )
+        except Exception:
+            return False
+
+    def _normalize_detail_value_for_check(s: str) -> str:
+        return re.sub(r"\s+", "", str(s or "")).strip()
+
     def _click_detail_address_field(edit=None) -> bool:
         if edit is None:
             edit = _find_detail_address_edittext()
 
-        if edit is None:
-            return False
+        try:
+            w, h = d.window_size()
+        except Exception:
+            w, h = (1080, 1920)
+
+        click_points = []
+        tried = set()
+
+        def _add_point(x, y):
+            try:
+                x = max(5, min(w - 5, int(x)))
+                y = max(5, min(h - 5, int(y)))
+                key = (x, y)
+                if key not in tried:
+                    tried.add(key)
+                    click_points.append((x, y))
+            except Exception:
+                pass
+
+        if edit is not None:
+            try:
+                b = edit.info.get("bounds", {})
+                left = int(b.get("left", 0))
+                top = int(b.get("top", 0))
+                right = int(b.get("right", 0))
+                bottom = int(b.get("bottom", 0))
+
+                width = max(1, right - left)
+                height = max(1, bottom - top)
+                cy = (top + bottom) // 2
+
+                _add_point((left + right) // 2, cy)
+                _add_point(left + max(30, int(width * 0.12)), cy)
+                _add_point(left + max(70, int(width * 0.28)), cy)
+                _add_point(left + max(110, int(width * 0.42)), cy)
+                _add_point((left + right) // 2, top + max(12, int(height * 0.35)))
+            except Exception:
+                pass
 
         try:
-            edit.click()
-            time.sleep(0.35)
+            result_bottom = _get_address_result_bottom()
         except Exception:
-            pass
+            result_bottom = 0
 
         try:
-            b = edit.info.get("bounds", {})
-            left = int(b.get("left", 0))
-            top = int(b.get("top", 0))
-            right = int(b.get("right", 0))
-            bottom = int(b.get("bottom", 0))
-
-            x_points = [
-                left + max(40, int((right - left) * 0.18)),
-                left + max(80, int((right - left) * 0.32)),
-                left + max(120, int((right - left) * 0.45)),
-            ]
-            y = (top + bottom) // 2
-
-            for x in x_points:
-                d.click(int(x), int(y))
-                time.sleep(0.30)
-
-            return True
+            submit_top = _get_detail_submit_top()
         except Exception:
+            submit_top = None
+
+        if submit_top is not None and submit_top > 0:
+            if result_bottom <= 0:
+                result_bottom = int(h * 0.24)
+
+            field_top = max(result_bottom + 18, int(h * 0.26))
+            field_bottom = min(submit_top - 18, int(h * 0.62))
+
+            if field_bottom > field_top:
+                mid_y = (field_top + field_bottom) // 2
+
+                _add_point(int(w * 0.50), mid_y)
+                _add_point(int(w * 0.22), mid_y)
+                _add_point(int(w * 0.35), mid_y)
+                _add_point(int(w * 0.65), mid_y)
+                _add_point(int(w * 0.50), field_top + max(8, int((field_bottom - field_top) * 0.30)))
+
+        if not click_points:
+            print("⚠️ [detail_address] 상세주소칸 클릭 좌표 생성 실패")
             return False
+
+        for idx, (x, y) in enumerate(click_points, start=1):
+            try:
+                d.click(x, y)
+                time.sleep(0.28)
+
+                focused = _find_focused_edittext()
+                if focused is not None:
+                    if edit is not None and _same_edit_bounds(focused, edit):
+                        print(f"✅ [detail_address] 상세주소칸 포커스 확인 완료: ({x}, {y})")
+                        return True
+
+                    try:
+                        if _is_detail_address_candidate(focused):
+                            print(f"✅ [detail_address] 상세주소 후보 포커스 전환 확인: ({x}, {y})")
+                            return True
+                    except Exception:
+                        pass
+
+                if idx == 1:
+                    try:
+                        d.long_click(x, y, 0.35)
+                        time.sleep(0.22)
+                        focused = _find_focused_edittext()
+                        if focused is not None:
+                            if edit is not None and _same_edit_bounds(focused, edit):
+                                print(f"✅ [detail_address] 상세주소칸 롱클릭 포커스 확인 완료: ({x}, {y})")
+                                return True
+                            try:
+                                if _is_detail_address_candidate(focused):
+                                    print(f"✅ [detail_address] 상세주소 후보 롱클릭 포커스 전환 확인: ({x}, {y})")
+                                    return True
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
+            except Exception:
+                continue
+
+        print("⚠️ [detail_address] 포커스 확인은 실패했지만 상세주소칸 좌표 클릭은 수행함")
+        return True
 
     def _click_address_submit_button() -> bool:
         try:
@@ -4663,17 +4769,20 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
             return False
 
         expected_raw = str(address_detail).strip()
+        expected_norm = _normalize_detail_value_for_check(expected_raw)
+        expected_digits = normalize_digits(expected_raw)
 
         for attempt in range(3):
             candidate = _find_detail_address_edittext()
             if candidate is None:
                 return _abort(f"전자서명 중단: 상세주소 입력칸 미검출 / 고객={job['name']}")
 
-            if not _click_detail_address_field(candidate):
+            clicked = _click_detail_address_field(candidate)
+            if not clicked:
+                print("⚠️ [detail_address] 상세주소칸 클릭 확정 실패 → 그래도 입력 시도 진행")
                 if attempt == 2:
                     return _abort(f"전자서명 중단: 상세주소칸 클릭 실패 / 고객={job['name']}")
-                time.sleep(0.8)
-                continue
+                time.sleep(0.5)
 
             if not _handle_input_method_picker_if_open():
                 if attempt == 2:
@@ -4681,27 +4790,92 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
                 time.sleep(0.8)
                 continue
 
-            if not _click_detail_address_field(candidate):
+            focused = _find_focused_edittext()
+            target_edit = None
+
+            if focused is not None:
+                if _same_edit_bounds(focused, candidate):
+                    target_edit = focused
+                else:
+                    try:
+                        if _is_detail_address_candidate(focused):
+                            target_edit = focused
+                    except Exception:
+                        target_edit = None
+
+            if target_edit is None:
+                target_edit = candidate
+
+            current_before = _read_edit_obj_text(target_edit)
+            print(f"🔍 [detail_address] 입력 전 현재값: '{current_before}'")
+
+            ok_input = type_into_edittext(d, target_edit, expected_raw)
+
+            refind = _find_focused_edittext()
+            if refind is None:
+                refind = _find_detail_address_edittext()
+            if refind is None:
+                refind = target_edit
+
+            current_text = _read_edit_obj_text(refind)
+            current_norm = _normalize_detail_value_for_check(current_text)
+            current_digits = normalize_digits(current_text)
+
+            print(f"🔍 [detail_address] type_into_edittext 결과: '{current_text}'")
+
+            value_ok = False
+            if current_norm == expected_norm:
+                value_ok = True
+            elif expected_digits and current_digits == expected_digits:
+                value_ok = True
+
+            if (not ok_input) or (not value_ok):
+                print("⚠️ [detail_address] 일반 입력 검증 실패 → AdbKeyboard fallback 시도")
+
+                reclicked = _click_detail_address_field(refind if refind is not None else candidate)
+                if not reclicked:
+                    print("⚠️ [detail_address] 상세주소칸 재포커스 확정 실패 → ADB fallback은 계속 시도")
+                    if attempt < 2:
+                        time.sleep(0.4)
+
+                adb_keyboard_clear_text()
+                time.sleep(0.2)
+
+                ok_adb = adb_keyboard_input_text(expected_raw)
+                if not ok_adb:
+                    if attempt == 2:
+                        return _abort(f"전자서명 중단: 상세주소 입력 실패 / 고객={job['name']} / 기대={expected_raw}")
+                    time.sleep(0.8)
+                    continue
+
+                time.sleep(0.6)
+
+                refind = _find_focused_edittext()
+                if refind is None:
+                    refind = _find_detail_address_edittext()
+                if refind is None:
+                    refind = candidate
+
+                current_text = _read_edit_obj_text(refind)
+                current_norm = _normalize_detail_value_for_check(current_text)
+                current_digits = normalize_digits(current_text)
+
+                print(f"🔍 [detail_address] adb_keyboard 결과: '{current_text}'")
+
+                value_ok = False
+                if current_norm == expected_norm:
+                    value_ok = True
+                elif expected_digits and current_digits == expected_digits:
+                    value_ok = True
+
+            if not value_ok:
                 if attempt == 2:
-                    return _abort(f"전자서명 중단: 상세주소칸 재클릭 실패 / 고객={job['name']}")
+                    return _abort(
+                        f"전자서명 중단: 상세주소 입력값 불일치 / 고객={job['name']} / 기대={expected_raw} / 현재={current_text}"
+                    )
+                print(f"⚠️ [ready_sign] 상세주소 입력값 불일치 → 재시도 {attempt + 1}/3")
                 time.sleep(0.8)
                 continue
-
-            time.sleep(0.4)
-
-            adb_keyboard_clear_text()
-            time.sleep(0.2)
-
-            ok_input = adb_keyboard_input_text(expected_raw)
-            if not ok_input:
-                if attempt == 2:
-                    return _abort(f"전자서명 중단: 상세주소 AdbKeyboard 입력 실패 / 고객={job['name']} / 기대={expected_raw}")
-                time.sleep(0.8)
-                continue
-
-            refind = _find_detail_address_edittext()
-            current_text = _read_edit_obj_text(refind if refind is not None else candidate)
-            print(f"🔍 [detail_address] adb_keyboard 결과: '{current_text}'")
 
             ok_click = _click_address_submit_button()
             if not ok_click:
@@ -4726,6 +4900,360 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
                 return _abort(f"전자서명 중단: 상세주소 입력 후 화면 전환 실패 / 고객={job['name']}")
 
         return _abort(f"전자서명 중단: 상세주소 입력 처리 최종 실패 / 고객={job['name']}")
+
+    def _is_saved_address_confirm_popup_open() -> bool:
+        popup_fragments = [
+            "선택한 주소를 다시 한번 확인해 주시기 바랍니다",
+            "선택한주소를다시한번확인해주시기바랍니다",
+            "해당 주소로 주문 및 설치를 진행하시겠습니까",
+            "해당주소로주문및설치를진행하시겠습니까",
+        ]
+
+        texts = _collect_popup_texts(0.20, 0.86)
+        joined = " ".join(texts)
+
+        if not joined:
+            return False
+
+        for frag in popup_fragments:
+            if re.sub(r"\s+", "", frag) in joined:
+                return True
+
+        return False
+
+    def _click_saved_new_address_card() -> bool:
+        label_obj = None
+
+        try:
+            if d(text="신규주소지").exists:
+                label_obj = d(text="신규주소지")
+            elif d(textContains="신규주소지").exists:
+                label_obj = d(textContains="신규주소지")
+        except Exception:
+            label_obj = None
+
+        if label_obj is None:
+            return False
+
+        try:
+            w, h = d.window_size()
+            b = label_obj.info.get("bounds", {})
+            left = int(b.get("left", 0))
+            top = int(b.get("top", 0))
+            right = int(b.get("right", 0))
+            bottom = int(b.get("bottom", 0))
+
+            card_y = min(h - 10, max(10, (top + bottom) // 2 + 26))
+            candidate_points = [
+                (int(w * 0.50), card_y),
+                (int(w * 0.38), card_y),
+                (int(w * 0.65), card_y),
+                (max(20, left + 120), card_y),
+                (max(20, right + 80), card_y),
+            ]
+
+            tried = set()
+            filtered_points = []
+            for x, y in candidate_points:
+                x = max(5, min(w - 5, int(x)))
+                y = max(5, min(h - 5, int(y)))
+                key = (x, y)
+                if key not in tried:
+                    filtered_points.append((x, y))
+                    tried.add(key)
+
+            for x, y in filtered_points:
+                d.click(x, y)
+                time.sleep(0.8)
+
+                if _is_saved_address_confirm_popup_open():
+                    print(f"✅ [ready_sign] 신규주소지 카드 클릭 완료: ({x}, {y})")
+                    return True
+
+            print("⚠️ [ready_sign] 신규주소지 텍스트는 찾았지만 확인 팝업이 안 뜸")
+            return False
+
+        except Exception as e:
+            print("⚠️ [ready_sign] 신규주소지 카드 클릭 예외:", e)
+            return False
+
+    def _handle_saved_address_selection_if_needed() -> bool:
+        for attempt in range(4):
+            if _is_saved_address_confirm_popup_open():
+                print("✅ [ready_sign] 신규주소지 확인 팝업 감지")
+                if not _click_confirm_if_exists():
+                    if attempt == 3:
+                        return _abort(f"전자서명 중단: 신규주소지 확인 팝업 확인 버튼 클릭 실패 / 고객={job['name']}")
+                    time.sleep(0.8)
+                    continue
+
+                time.sleep(1.5)
+
+                if _wait_install_info_ready(timeout_sec=6.0):
+                    print("✅ [ready_sign] 신규주소지 확인 완료 후 설치정보 화면 복귀")
+                    return True
+
+            if _wait_install_info_ready(timeout_sec=1.2):
+                return True
+
+            if not _wait_address_management_ready(timeout_sec=2.5):
+                if attempt == 3:
+                    return _abort(f"전자서명 중단: 주소지 관리/설치정보 화면 판정 실패 / 고객={job['name']}")
+                time.sleep(0.6)
+                continue
+
+            clicked = _click_saved_new_address_card()
+            if not clicked:
+                if attempt == 3:
+                    return _abort(f"전자서명 중단: 신규주소지 선택 실패 / 고객={job['name']}")
+                time.sleep(0.8)
+                continue
+
+            time.sleep(0.8)
+
+            if _is_saved_address_confirm_popup_open():
+                print("✅ [ready_sign] 신규주소지 확인 팝업 감지")
+                if not _click_confirm_if_exists():
+                    if attempt == 3:
+                        return _abort(f"전자서명 중단: 신규주소지 확인 팝업 확인 버튼 클릭 실패 / 고객={job['name']}")
+                    time.sleep(0.8)
+                    continue
+
+                time.sleep(1.5)
+
+                if _wait_install_info_ready(timeout_sec=6.0):
+                    print("✅ [ready_sign] 신규주소지 선택/확인 완료 후 설치정보 화면 복귀")
+                    return True
+
+            if attempt < 3:
+                time.sleep(0.8)
+
+        return _abort(f"전자서명 중단: 신규주소지 선택 후 설치정보 화면 복귀 실패 / 고객={job['name']}")
+
+    def _fill_install_home_phone(phone11: str) -> bool:
+        if not phone11:
+            return _abort(f"전자서명 중단: 전화번호 값 없음 / 고객={job['name']}")
+
+        def _find_install_home_phone_edit():
+            try:
+                w, h = d.window_size()
+            except Exception:
+                w, h = (1080, 1920)
+
+            best = None
+            best_score = None
+
+            try:
+                edits = d(className="android.widget.EditText")
+                cnt = edits.count
+            except Exception:
+                cnt = 0
+
+            for i in range(cnt):
+                try:
+                    e = edits[i]
+                    info = e.info or {}
+                    b = info.get("bounds", {})
+
+                    left = int(b.get("left", 0))
+                    top = int(b.get("top", 0))
+                    right = int(b.get("right", 0))
+                    bottom = int(b.get("bottom", 0))
+                    width = right - left
+
+                    if top < int(h * 0.22) or bottom > int(h * 0.60):
+                        continue
+
+                    if width < int(w * 0.45):
+                        continue
+
+                    meta = _get_edit_meta_text(e)
+                    meta_norm = re.sub(r"\s+", "", str(meta or ""))
+
+                    if "자택번호를입력해주세요" in meta_norm or "선택" in meta_norm:
+                        score = top
+                        if best is None or score < best_score:
+                            best = e
+                            best_score = score
+                        continue
+
+                    current_text = _read_edit_obj_text(e)
+                    current_digits = normalize_digits(current_text)
+
+                    if current_digits:
+                        continue
+
+                    if "휴대폰번호" in meta_norm:
+                        continue
+
+                    score = 100000 + top
+                    if best is None or score < best_score:
+                        best = e
+                        best_score = score
+
+                except Exception:
+                    continue
+
+            return best
+
+        edit = _find_install_home_phone_edit()
+        if edit is None:
+            return _abort(f"전자서명 중단: 전화번호 입력칸 미검출 / 고객={job['name']}")
+
+        before_text = _read_edit_obj_text(edit)
+        before_digits = normalize_digits(before_text)
+        print(f"🔍 [ready_sign] 전화번호 입력 전 현재값: '{before_text}'")
+
+        if before_digits and before_digits == phone11:
+            print(f"✅ [ready_sign] 전화번호 이미 입력 일치: {phone11}")
+            return True
+
+        ok = type_into_edittext(d, edit, phone11)
+        if not ok:
+            return _abort(f"전자서명 중단: 전화번호 입력 실패 / 고객={job['name']} / 전화번호={phone11}")
+
+        time.sleep(0.8)
+
+        current_text = _read_edit_obj_text(edit)
+        current_digits = normalize_digits(current_text)
+        print(f"🔍 [ready_sign] 전화번호 입력 후 현재값: '{current_text}'")
+
+        if current_digits != phone11:
+            return _abort(f"전자서명 중단: 전화번호 입력값 불일치 / 고객={job['name']} / 기대={phone11} / 현재={current_digits}")
+
+        print(f"✅ [ready_sign] 전화번호 입력 완료: {phone11}")
+        return True
+
+    def _wait_install_place_category_sheet_ready(timeout_sec: float = 6.0) -> bool:
+        end_at = time.time() + timeout_sec
+
+        while time.time() < end_at:
+            try:
+                if is_unexpected_digital_sales_home(d):
+                    return False
+
+                has_title = d(text="설치처 분류").exists or d(textContains="설치처 분류").exists
+                has_home = d(text="가정").exists or d(textContains="가정").exists
+
+                if has_title and has_home:
+                    print("✅ [ready_sign] 설치처 분류 선택 시트 준비 완료")
+                    time.sleep(0.3)
+                    return True
+            except Exception:
+                pass
+
+            time.sleep(0.25)
+
+        print("❌ [ready_sign] 설치처 분류 선택 시트 준비 실패")
+        return False
+
+    def _open_install_place_category_selector() -> bool:
+        try:
+            if d(text="설치처 분류 선택").exists:
+                ok = click_text_center(d, "설치처 분류 선택", 0.35, 0.78)
+                time.sleep(1.2)
+                return ok
+        except Exception:
+            pass
+
+        try:
+            if d(textContains="설치처 분류 선택").exists:
+                d(textContains="설치처 분류 선택").click()
+                time.sleep(1.2)
+                return True
+        except Exception:
+            pass
+
+        label_obj = None
+
+        try:
+            if d(text="설치처 분류").exists:
+                label_obj = d(text="설치처 분류")
+            elif d(textContains="설치처 분류").exists:
+                label_obj = d(textContains="설치처 분류")
+        except Exception:
+            label_obj = None
+
+        if label_obj is not None:
+            try:
+                w, h = d.window_size()
+                b = label_obj.info.get("bounds", {})
+                bottom = int(b.get("bottom", 0))
+                field_y = min(h - 10, bottom + max(52, int(h * 0.03)))
+
+                candidate_points = [
+                    (int(w * 0.50), field_y),
+                    (int(w * 0.72), field_y),
+                    (int(w * 0.85), field_y),
+                ]
+
+                for x, y in candidate_points:
+                    d.click(x, y)
+                    time.sleep(1.0)
+                    if _wait_install_place_category_sheet_ready(timeout_sec=1.5):
+                        return True
+            except Exception:
+                pass
+
+        return False
+
+    def _select_install_place_home() -> bool:
+        for attempt in range(3):
+            if not _open_install_place_category_selector():
+                if attempt == 2:
+                    return _abort(f"전자서명 중단: 설치처 분류 선택 열기 실패 / 고객={job['name']}")
+                time.sleep(0.8)
+                continue
+
+            if not _wait_install_place_category_sheet_ready(timeout_sec=4.0):
+                if attempt == 2:
+                    return _abort(f"전자서명 중단: 설치처 분류 선택 시트 미검출 / 고객={job['name']}")
+                time.sleep(0.8)
+                continue
+
+            clicked = False
+
+            try:
+                if d(text="가정").exists:
+                    d(text="가정").click()
+                    clicked = True
+            except Exception:
+                clicked = False
+
+            if not clicked:
+                try:
+                    if d(textContains="가정").exists:
+                        d(textContains="가정").click()
+                        clicked = True
+                except Exception:
+                    clicked = False
+
+            if not clicked:
+                try:
+                    clicked = click_text_center(d, "가정", 0.58, 0.96)
+                except Exception:
+                    clicked = False
+
+            if not clicked:
+                if attempt == 2:
+                    return _abort(f"전자서명 중단: 설치처 분류 '가정' 클릭 실패 / 고객={job['name']}")
+                time.sleep(0.8)
+                continue
+
+            time.sleep(1.2)
+
+            try:
+                if d(text="가정").exists or d(textContains="가정").exists:
+                    print("✅ [ready_sign] 설치처 분류 선택 완료: 가정")
+                    return True
+            except Exception:
+                pass
+
+            if _wait_install_info_ready(timeout_sec=2.0):
+                print("✅ [ready_sign] 설치처 분류 선택 완료: 가정")
+                return True
+
+        return _abort(f"전자서명 중단: 설치처 분류 '가정' 선택 처리 실패 / 고객={job['name']}")
 
     def _fill_install_info_address(phone11: str, zipcode: str, address_basic: str, address_detail: str) -> bool:
         if not _wait_install_info_ready(timeout_sec=12.0):
@@ -4757,10 +5285,22 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
         if not _fill_detail_address_and_submit(address_detail):
             return False
 
+        if not _handle_saved_address_selection_if_needed():
+            return False
+
         if not _wait_install_info_ready(timeout_sec=12.0):
             return _abort(f"전자서명 중단: 주소 입력 후 설치정보 화면 복귀 실패 / 고객={job['name']}")
 
-        print(f"✅ [ready_sign] 설치정보 주소 입력 완료: {job['name']}")
+        if not _fill_install_home_phone(phone11):
+            return False
+
+        if not _select_install_place_home():
+            return False
+
+        if not _wait_install_info_ready(timeout_sec=12.0):
+            return _abort(f"전자서명 중단: 설치처 분류 선택 후 설치정보 화면 확인 실패 / 고객={job['name']}")
+
+        print(f"✅ [ready_sign] 설치정보 주소/전화번호/설치처분류 입력 완료: {job['name']}")
         return True
 
     def _try_resume_from_current_screen(
