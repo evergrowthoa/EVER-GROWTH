@@ -3021,25 +3021,91 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
             return _abort(f"전자서명 중단: 모달 관리 추출 실패 / 고객={job['name']} / 원본관리={manage_raw}")
 
         if target == "자가":
-            candidates = ["자가관리", "자가", "셀프"]
+            exact_candidates = ["자가관리", "자가", "셀프"]
+            loose_candidates = ["자가관리", "자가", "셀프"]
         else:
-            candidates = [f"방문관리-{target}", target, target.replace("M", "개월"), target.replace("M", "개월관리")]
+            exact_candidates = [
+                f"방문관리-{target}",
+                target,
+                target.replace("M", "개월"),
+                target.replace("M", "개월관리"),
+            ]
+            loose_candidates = list(exact_candidates)
 
         print(f"🔎 [ready_sign] 관리유형 선택 목표: {target}")
 
-        item = _click_first_text_candidate(candidates, y_min_ratio=0.40, y_max_ratio=0.92)
+        def _norm(s: str) -> str:
+            return re.sub(r"\s+", "", str(s or "")).strip()
+
+        def _pick_manage_candidate(y_min_ratio: float, y_max_ratio: float):
+            items = _collect_visible_text_items(y_min_ratio, y_max_ratio)
+            exact_norms = [_norm(x) for x in exact_candidates]
+            loose_norms = [_norm(x) for x in loose_candidates]
+
+            filtered = []
+            for it in items:
+                txt = str(it.get("text") or "").strip()
+                txt_norm = _norm(txt)
+                if not txt_norm:
+                    continue
+
+                # 안내문/설명문/긴 문장 제외
+                if len(txt_norm) > 16:
+                    continue
+                if "선택할수있습니다" in txt_norm:
+                    continue
+                if "방문하여관리를받거나" in txt_norm:
+                    continue
+                if "유형을선택" in txt_norm:
+                    continue
+
+                filtered.append({
+                    "text": txt,
+                    "text_norm": txt_norm,
+                    "bounds": it["bounds"],
+                    "class_name": it.get("class_name", ""),
+                })
+
+            # 1) 완전일치 우선
+            for want in exact_norms:
+                for it in filtered:
+                    if it["text_norm"] == want:
+                        return it
+
+            # 2) 부분일치는 짧은 후보만 허용
+            for want in loose_norms:
+                for it in filtered:
+                    if want and want in it["text_norm"]:
+                        return it
+
+            return None
+
+        def _click_manage_item(item) -> bool:
+            try:
+                left, top, right, bottom = item["bounds"]
+                cx = (left + right) // 2
+                cy = (top + bottom) // 2
+                d.click(cx, cy)
+                time.sleep(1.2)
+                return True
+            except Exception:
+                return False
+
+        item = _pick_manage_candidate(0.40, 0.92)
         if item is not None:
-            print(f"✅ [ready_sign] 관리유형 선택 완료: {item['text']}")
-            return True
+            if _click_manage_item(item):
+                print(f"✅ [ready_sign] 관리유형 선택 완료: {item['text']}")
+                return True
 
         if d(text="관리유형").exists:
             click_text_center(d, "관리유형", 0.35, 0.90)
-            time.sleep(2.0)
+            time.sleep(1.2)
 
-        item = _click_first_text_candidate(candidates, y_min_ratio=0.40, y_max_ratio=0.95)
+        item = _pick_manage_candidate(0.40, 0.95)
         if item is not None:
-            print(f"✅ [ready_sign] 관리유형 선택 완료: {item['text']}")
-            return True
+            if _click_manage_item(item):
+                print(f"✅ [ready_sign] 관리유형 선택 완료: {item['text']}")
+                return True
 
         try:
             w, h = d.window_size()
@@ -3048,10 +3114,11 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
         except Exception:
             pass
 
-        item = _click_first_text_candidate(candidates, y_min_ratio=0.35, y_max_ratio=0.98)
+        item = _pick_manage_candidate(0.35, 0.98)
         if item is not None:
-            print(f"✅ [ready_sign] 관리유형 선택 완료: {item['text']}")
-            return True
+            if _click_manage_item(item):
+                print(f"✅ [ready_sign] 관리유형 선택 완료: {item['text']}")
+                return True
 
         return _abort(f"전자서명 중단: 관리유형 일치 옵션 없음 / 고객={job['name']} / 모달관리={manage_raw} / 목표={target}")
 
@@ -4699,8 +4766,6 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
             return None
 
     def _handle_input_method_picker_if_open() -> bool:
-        ensure_adb_keyboard_ime()
-
         picker_open = False
 
         for kw in ["입력 방법 선택", "입력방법선택"]:
@@ -4714,14 +4779,13 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
         if not picker_open:
             return True
 
-        print("⚠️ [ready_sign] 입력 방법 선택 팝업 감지 → AdbKeyboard 선택")
+        print("⚠️ [ready_sign] 입력 방법 선택 팝업 감지 → AdbKeyboard 선택 시도")
 
         for kw in ["AdbKeyboard", "ADBKeyboard", "Adb Keyboard"]:
             try:
                 if d(text=kw).exists:
                     d(text=kw).click()
                     time.sleep(0.8)
-                    ensure_adb_keyboard_ime()
                     return True
             except Exception:
                 pass
@@ -4730,12 +4794,18 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
                 if d(textContains=kw).exists:
                     d(textContains=kw).click()
                     time.sleep(0.8)
-                    ensure_adb_keyboard_ime()
                     return True
             except Exception:
                 pass
 
-        return False
+        try:
+            d.press("back")
+            time.sleep(0.5)
+        except Exception:
+            pass
+
+        print("⚠️ [ready_sign] 입력 방법 선택 팝업에서 AdbKeyboard 미검출 → 기본 입력 방식 유지")
+        return True
 
     def _same_edit_bounds(a, b) -> bool:
         if a is None or b is None:
@@ -5490,15 +5560,29 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
             try:
                 if is_unexpected_digital_sales_home(d):
                     return False
+
                 has_title = d(text="방문 희망일시 선택").exists or d(textContains="방문 희망일시 선택").exists
-                has_done = d(text="선택완료").exists or d(textContains="선택완료").exists
-                if has_title and has_done:
+                has_more = d(text="더보기").exists or d(textContains="더보기").exists
+                has_deadline = d(text="마감").exists or d(textContains="마감").exists
+                has_holiday = d(text="휴일").exists or d(textContains="휴일").exists
+
+                has_date_like = False
+                items = _collect_visible_text_items(0.08, 0.72)
+                for it in items:
+                    txt = str(it.get("text") or "").strip()
+                    if re.fullmatch(r"\d{1,2}\.\d{1,2}", txt):
+                        has_date_like = True
+                        break
+
+                if has_title and (has_more or has_deadline or has_holiday or has_date_like):
                     print("✅ [ready_sign] 방문 희망일시 선택 시트 준비 완료")
                     time.sleep(0.3)
                     return True
             except Exception:
                 pass
+
             time.sleep(0.25)
+
         print("❌ [ready_sign] 방문 희망일시 선택 시트 준비 실패")
         return False
 
@@ -5506,17 +5590,22 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
         if not _open_install_datetime_selector():
             return _abort(f"전자서명 중단: 설치희망일시 선택 열기 실패 / 고객={job['name']}")
 
+        print("⏳ [ready_sign] 방문 희망일시 배정판 로딩 대기 5.0초")
+        time.sleep(5.0)
+
         if not _wait_fast_install_sheet_ready(timeout_sec=5.0):
             return _abort(f"전자서명 중단: 방문 희망일시 선택 시트 미검출 / 고객={job['name']}")
 
-        items = _collect_visible_text_items(0.10, 0.70)
+        items = _collect_visible_text_items(0.10, 0.74)
 
         slot_candidates = []
         for it in items:
             txt = str(it["text"] or "").strip()
             if txt not in ["○", "◯"]:
                 continue
+
             left, top, right, bottom = it["bounds"]
+
             slot_candidates.append({
                 "text": txt,
                 "bounds": (left, top, right, bottom),
@@ -5532,29 +5621,35 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
         cx = (left + right) // 2
         cy = (top + bottom) // 2
         d.click(cx, cy)
-        time.sleep(0.8)
+        time.sleep(1.0)
 
         clicked_done = False
-        try:
-            if d(text="선택완료").exists:
-                d(text="선택완료").click()
-                clicked_done = True
-        except Exception:
-            clicked_done = False
 
-        if not clicked_done:
+        for _ in range(8):
+            try:
+                if d(text="선택완료").exists:
+                    d(text="선택완료").click()
+                    clicked_done = True
+                    break
+            except Exception:
+                pass
+
             try:
                 if d(textContains="선택완료").exists:
                     d(textContains="선택완료").click()
                     clicked_done = True
+                    break
             except Exception:
-                clicked_done = False
+                pass
 
-        if not clicked_done:
             try:
-                clicked_done = click_text_center(d, "선택완료", 0.85, 0.99)
+                if click_text_center(d, "선택완료", 0.82, 0.99):
+                    clicked_done = True
+                    break
             except Exception:
-                clicked_done = False
+                pass
+
+            time.sleep(0.3)
 
         if not clicked_done:
             return _abort(f"전자서명 중단: 방문 희망일시 선택완료 클릭 실패 / 고객={job['name']}")
