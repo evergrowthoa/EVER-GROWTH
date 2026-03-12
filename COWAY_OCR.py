@@ -2473,6 +2473,10 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
             ("그레이", "그레이"),
             ("gray", "그레이"),
             ("grey", "그레이"),
+            ("그린", "그린"),
+            ("green", "그린"),
+            ("민트", "그린"),
+            ("mint", "그린"),
             ("블루", "블루"),
             ("blue", "블루"),
             ("핑크", "핑크"),
@@ -2481,6 +2485,8 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
             ("black", "블랙"),
             ("실버", "실버"),
             ("silver", "실버"),
+            ("브라운", "브라운"),
+            ("brown", "브라운"),
         ]
 
         for key, val in pairs:
@@ -5432,7 +5438,348 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
 
         return _abort(f"전자서명 중단: 설치처 분류 '가정' 선택 처리 실패 / 고객={job['name']}")
 
-    def _fill_install_info_address(phone11: str, zipcode: str, address_basic: str, address_detail: str) -> bool:
+    def _needs_fast_install_request(note_text: str) -> bool:
+        s = re.sub(r"\s+", "", str(note_text or ""))
+        return ("가장빠른설치요청" in s) or ("빠른설치요청" in s)
+
+    def _open_install_datetime_selector() -> bool:
+        try:
+            if d(text="설치일시 선택").exists:
+                ok = click_text_center(d, "설치일시 선택", 0.35, 0.80)
+                time.sleep(1.2)
+                return ok
+        except Exception:
+            pass
+
+        try:
+            if d(textContains="설치일시 선택").exists:
+                d(textContains="설치일시 선택").click()
+                time.sleep(1.2)
+                return True
+        except Exception:
+            pass
+
+        label_obj = None
+        try:
+            if d(text="설치희망일시").exists:
+                label_obj = d(text="설치희망일시")
+            elif d(textContains="설치희망일시").exists:
+                label_obj = d(textContains="설치희망일시")
+        except Exception:
+            label_obj = None
+
+        if label_obj is not None:
+            try:
+                w, h = d.window_size()
+                b = label_obj.info.get("bounds", {})
+                bottom = int(b.get("bottom", 0))
+                field_y = min(h - 10, bottom + max(50, int(h * 0.03)))
+                for x in [int(w * 0.50), int(w * 0.74), int(w * 0.86)]:
+                    d.click(x, field_y)
+                    time.sleep(1.0)
+                    if d(textContains="방문 희망일시 선택").exists or d(text="선택완료").exists:
+                        return True
+            except Exception:
+                pass
+
+        return False
+
+    def _wait_fast_install_sheet_ready(timeout_sec: float = 6.0) -> bool:
+        end_at = time.time() + timeout_sec
+        while time.time() < end_at:
+            try:
+                if is_unexpected_digital_sales_home(d):
+                    return False
+                has_title = d(text="방문 희망일시 선택").exists or d(textContains="방문 희망일시 선택").exists
+                has_done = d(text="선택완료").exists or d(textContains="선택완료").exists
+                if has_title and has_done:
+                    print("✅ [ready_sign] 방문 희망일시 선택 시트 준비 완료")
+                    time.sleep(0.3)
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.25)
+        print("❌ [ready_sign] 방문 희망일시 선택 시트 준비 실패")
+        return False
+
+    def _pick_earliest_visit_slot_and_done() -> bool:
+        if not _open_install_datetime_selector():
+            return _abort(f"전자서명 중단: 설치희망일시 선택 열기 실패 / 고객={job['name']}")
+
+        if not _wait_fast_install_sheet_ready(timeout_sec=5.0):
+            return _abort(f"전자서명 중단: 방문 희망일시 선택 시트 미검출 / 고객={job['name']}")
+
+        items = _collect_visible_text_items(0.10, 0.70)
+
+        slot_candidates = []
+        for it in items:
+            txt = str(it["text"] or "").strip()
+            if txt not in ["○", "◯"]:
+                continue
+            left, top, right, bottom = it["bounds"]
+            slot_candidates.append({
+                "text": txt,
+                "bounds": (left, top, right, bottom),
+            })
+
+        slot_candidates.sort(key=lambda x: (x["bounds"][1], x["bounds"][0]))
+
+        if not slot_candidates:
+            return _abort(f"전자서명 중단: 방문 희망일시 선택 가능 슬롯 미검출 / 고객={job['name']}")
+
+        chosen = slot_candidates[0]
+        left, top, right, bottom = chosen["bounds"]
+        cx = (left + right) // 2
+        cy = (top + bottom) // 2
+        d.click(cx, cy)
+        time.sleep(0.8)
+
+        clicked_done = False
+        try:
+            if d(text="선택완료").exists:
+                d(text="선택완료").click()
+                clicked_done = True
+        except Exception:
+            clicked_done = False
+
+        if not clicked_done:
+            try:
+                if d(textContains="선택완료").exists:
+                    d(textContains="선택완료").click()
+                    clicked_done = True
+            except Exception:
+                clicked_done = False
+
+        if not clicked_done:
+            try:
+                clicked_done = click_text_center(d, "선택완료", 0.85, 0.99)
+            except Exception:
+                clicked_done = False
+
+        if not clicked_done:
+            return _abort(f"전자서명 중단: 방문 희망일시 선택완료 클릭 실패 / 고객={job['name']}")
+
+        time.sleep(1.2)
+
+        if not _wait_install_info_ready(timeout_sec=6.0):
+            return _abort(f"전자서명 중단: 설치희망일시 선택 후 설치정보 화면 복귀 실패 / 고객={job['name']}")
+
+        print("✅ [ready_sign] 가장 빠른 설치희망일시 선택 완료")
+        return True
+
+    def _open_install_env_info() -> bool:
+        try:
+            if d(text="미입력").exists:
+                ok = click_text_center(d, "미입력", 0.45, 0.85)
+                time.sleep(1.0)
+                return ok
+        except Exception:
+            pass
+
+        label_obj = None
+        try:
+            if d(text="설치환경정보").exists:
+                label_obj = d(text="설치환경정보")
+            elif d(textContains="설치환경정보").exists:
+                label_obj = d(textContains="설치환경정보")
+        except Exception:
+            label_obj = None
+
+        if label_obj is not None:
+            try:
+                w, h = d.window_size()
+                b = label_obj.info.get("bounds", {})
+                bottom = int(b.get("bottom", 0))
+                field_y = min(h - 10, bottom + max(50, int(h * 0.03)))
+                for x in [int(w * 0.50), int(w * 0.72), int(w * 0.86)]:
+                    d.click(x, field_y)
+                    time.sleep(1.0)
+                    if d(textContains="타사제품 반환여부").exists or d(text="입력완료").exists:
+                        return True
+            except Exception:
+                pass
+
+        return False
+
+    def _wait_install_env_ready(timeout_sec: float = 6.0) -> bool:
+        end_at = time.time() + timeout_sec
+        while time.time() < end_at:
+            try:
+                if is_unexpected_digital_sales_home(d):
+                    return False
+                has_done = d(text="입력완료").exists or d(textContains="입력완료").exists
+                has_return = d(textContains="타사제품 반환여부").exists or d(text="미반환").exists or d(text="반환").exists
+                has_multi = d(textContains="다중시설").exists
+                if has_done and has_return and has_multi:
+                    print("✅ [ready_sign] 설치환경정보 화면 준비 완료")
+                    time.sleep(0.3)
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.25)
+        print("❌ [ready_sign] 설치환경정보 화면 준비 실패")
+        return False
+
+    def _wait_multifacility_sheet_ready(timeout_sec: float = 5.0) -> bool:
+        end_at = time.time() + timeout_sec
+        while time.time() < end_at:
+            try:
+                has_title = d(text="다중시설 선택").exists or d(textContains="다중시설 선택").exists
+                has_target = d(text="대상 아님").exists or d(textContains="대상 아님").exists
+                if has_title and has_target:
+                    print("✅ [ready_sign] 다중시설 선택 시트 준비 완료")
+                    time.sleep(0.2)
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.2)
+        print("❌ [ready_sign] 다중시설 선택 시트 준비 실패")
+        return False
+
+    def _fill_install_env_info(pickup_request_raw: str) -> bool:
+        if not _open_install_env_info():
+            return _abort(f"전자서명 중단: 설치환경정보 열기 실패 / 고객={job['name']}")
+
+        if not _wait_install_env_ready(timeout_sec=5.0):
+            return _abort(f"전자서명 중단: 설치환경정보 화면 미검출 / 고객={job['name']}")
+
+        if str(pickup_request_raw or "").strip():
+            clicked_return = False
+            try:
+                if d(text="반환").exists:
+                    d(text="반환").click()
+                    clicked_return = True
+            except Exception:
+                clicked_return = False
+
+            if not clicked_return:
+                try:
+                    if d(textContains="반환").exists:
+                        d(textContains="반환").click()
+                        clicked_return = True
+                except Exception:
+                    clicked_return = False
+
+            if not clicked_return:
+                return _abort(f"전자서명 중단: 타사제품 반환여부 '반환' 클릭 실패 / 고객={job['name']}")
+
+            time.sleep(0.6)
+            print("✅ [ready_sign] 타사제품 반환여부 선택 완료: 반환")
+
+        opened_multi = False
+        try:
+            if d(text="다중시설 선택").exists:
+                d(text="다중시설 선택").click()
+                opened_multi = True
+        except Exception:
+            opened_multi = False
+
+        if not opened_multi:
+            try:
+                if d(textContains="다중시설 선택").exists:
+                    d(textContains="다중시설 선택").click()
+                    opened_multi = True
+            except Exception:
+                opened_multi = False
+
+        if not opened_multi:
+            return _abort(f"전자서명 중단: 다중시설 선택 열기 실패 / 고객={job['name']}")
+
+        time.sleep(0.8)
+
+        if not _wait_multifacility_sheet_ready(timeout_sec=4.0):
+            return _abort(f"전자서명 중단: 다중시설 선택 시트 미검출 / 고객={job['name']}")
+
+        clicked_target = False
+        try:
+            if d(text="대상 아님").exists:
+                d(text="대상 아님").click()
+                clicked_target = True
+        except Exception:
+            clicked_target = False
+
+        if not clicked_target:
+            try:
+                if d(textContains="대상 아님").exists:
+                    d(textContains="대상 아님").click()
+                    clicked_target = True
+            except Exception:
+                clicked_target = False
+
+        if not clicked_target:
+            return _abort(f"전자서명 중단: 다중시설 '대상 아님' 클릭 실패 / 고객={job['name']}")
+
+        time.sleep(0.8)
+
+        clicked_done = False
+        try:
+            if d(text="입력완료").exists:
+                d(text="입력완료").click()
+                clicked_done = True
+        except Exception:
+            clicked_done = False
+
+        if not clicked_done:
+            try:
+                if d(textContains="입력완료").exists:
+                    d(textContains="입력완료").click()
+                    clicked_done = True
+            except Exception:
+                clicked_done = False
+
+        if not clicked_done:
+            try:
+                clicked_done = click_text_center(d, "입력완료", 0.85, 0.99)
+            except Exception:
+                clicked_done = False
+
+        if not clicked_done:
+            return _abort(f"전자서명 중단: 설치환경정보 입력완료 클릭 실패 / 고객={job['name']}")
+
+        time.sleep(1.2)
+
+        if not _wait_install_info_ready(timeout_sec=6.0):
+            return _abort(f"전자서명 중단: 설치환경정보 입력 후 설치정보 화면 복귀 실패 / 고객={job['name']}")
+
+        print("✅ [ready_sign] 설치환경정보 입력 완료")
+        return True
+
+    def _fill_install_memo(note_text: str) -> bool:
+        note_text = str(note_text or "").strip()
+        if not note_text:
+            print("ℹ️ [ready_sign] 설치메모 입력 생략(특이사항 없음)")
+            return True
+
+        edit = _find_edittext_near_label(["설치메모"], y_tolerance=100, y_below=260)
+        if edit is None:
+            return _abort(f"전자서명 중단: 설치메모 입력칸 미검출 / 고객={job['name']}")
+
+        ok = type_into_edittext(d, edit, note_text)
+        if not ok:
+            return _abort(f"전자서명 중단: 설치메모 입력 실패 / 고객={job['name']}")
+
+        time.sleep(0.6)
+
+        current_text = _read_edit_obj_text(edit)
+        current_norm = re.sub(r"\s+", "", str(current_text or ""))
+        expect_norm = re.sub(r"\s+", "", note_text)
+
+        if current_norm != expect_norm:
+            return _abort(
+                f"전자서명 중단: 설치메모 입력값 불일치 / 고객={job['name']} / 기대={note_text} / 현재={current_text}"
+            )
+
+        print("✅ [ready_sign] 설치메모 입력 완료")
+        return True
+
+    def _fill_install_info_address(
+        phone11: str,
+        zipcode: str,
+        address_basic: str,
+        address_detail: str,
+        pickup_request_raw: str,
+        special_note_raw: str,
+    ) -> bool:
         if not _wait_install_info_ready(timeout_sec=12.0):
             return _abort(f"전자서명 중단: 설치정보 화면 진입 실패 / 고객={job['name']}")
 
@@ -5477,7 +5824,20 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
         if not _wait_install_info_ready(timeout_sec=12.0):
             return _abort(f"전자서명 중단: 설치처 분류 선택 후 설치정보 화면 확인 실패 / 고객={job['name']}")
 
-        print(f"✅ [ready_sign] 설치정보 주소/전화번호/설치처분류 입력 완료: {job['name']}")
+        if _needs_fast_install_request(special_note_raw):
+            if not _pick_earliest_visit_slot_and_done():
+                return False
+
+        if not _fill_install_env_info(pickup_request_raw):
+            return False
+
+        if not _fill_install_memo(special_note_raw):
+            return False
+
+        if not _wait_install_info_ready(timeout_sec=12.0):
+            return _abort(f"전자서명 중단: 설치메모 입력 후 설치정보 화면 확인 실패 / 고객={job['name']}")
+
+        print(f"✅ [ready_sign] 설치정보 주소/전화번호/설치처분류/설치희망일시/설치환경/설치메모 입력 완료: {job['name']}")
         return True
 
     def _try_resume_from_current_screen(
@@ -5488,10 +5848,19 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
         zipcode: str,
         address_basic: str,
         address_detail: str,
+        pickup_request_raw: str,
+        special_note_raw: str,
     ):
         if _wait_install_info_ready(timeout_sec=3.0):
             print(f"✅ [ready_sign] 주문 이어서 하기 후 설치정보 화면 진입 감지: {job['name']}")
-            return _fill_install_info_address(phone11, zipcode, address_basic, address_detail)
+            return _fill_install_info_address(
+                phone11,
+                zipcode,
+                address_basic,
+                address_detail,
+                pickup_request_raw,
+                special_note_raw,
+            )
 
         if _wait_payment_info_ready(timeout_sec=3.0):
             print(f"✅ [ready_sign] 주문 이어서 하기 후 결제정보 선택 화면 진입 감지: {job['name']}")
@@ -5502,7 +5871,14 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
             if not _open_payment_method_and_click_add(account_raw):
                 return False
 
-            return _fill_install_info_address(phone11, zipcode, address_basic, address_detail)
+            return _fill_install_info_address(
+                phone11,
+                zipcode,
+                address_basic,
+                address_detail,
+                pickup_request_raw,
+                special_note_raw,
+            )
 
         if _wait_discount_page_ready(timeout_sec=3.0):
             print(f"✅ [ready_sign] 주문 이어서 하기 후 할인정보 입력 화면 진입 감지: {job['name']}")
@@ -5522,7 +5898,14 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
             if not _open_payment_method_and_click_add(account_raw):
                 return False
 
-            return _fill_install_info_address(phone11, zipcode, address_basic, address_detail)
+            return _fill_install_info_address(
+                phone11,
+                zipcode,
+                address_basic,
+                address_detail,
+                pickup_request_raw,
+                special_note_raw,
+            )
 
         return None
     
@@ -5725,6 +6108,8 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
         zipcode = (job.get("zipcode") or "").strip()
         address_basic = (job.get("address_basic") or job.get("address") or "").strip()
         address_detail = (job.get("address_detail") or "").strip()
+        pickup_request_raw = (job.get("pickup_request_raw") or "").strip()
+        special_note_raw = (job.get("special_note_raw") or "").strip()
 
         if not search_model:
             return _abort(f"전자서명 중단: 모달 모델명 추출 실패 / 고객={job['name']}")
@@ -5776,6 +6161,8 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
             zipcode=zipcode,
             address_basic=address_basic,
             address_detail=address_detail,
+            pickup_request_raw=pickup_request_raw,
+            special_note_raw=special_note_raw,
         )
 
         if resume_result is True:
@@ -5820,7 +6207,14 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
         if not _open_payment_method_and_click_add(account_raw):
             return False
 
-        if not _fill_install_info_address(phone11, zipcode, address_basic, address_detail):
+        if not _fill_install_info_address(
+            phone11,
+            zipcode,
+            address_basic,
+            address_detail,
+            pickup_request_raw,
+            special_note_raw,
+        ):
             return False
 
         SIGN_IN_PROGRESS = True
