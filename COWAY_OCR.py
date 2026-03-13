@@ -3648,11 +3648,7 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
         if not s:
             return False
 
-        return bool(
-            re.search(r"(?<!\d)\d{2}/\d{2}(?!\d)", s)
-            or re.search(r"(?<!\d)\d{4}/\d{2}(?!\d)", s)
-            or re.search(r"(?<!\d)\d{2}/\d{4}(?!\d)", s)
-        )
+        return "/" in s
 
     def _extract_bank_name_from_account(account_raw: str) -> str:
         s = re.sub(r"\s+", "", str(account_raw or ""))
@@ -3665,6 +3661,371 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
 
     def _extract_account_digits(account_raw: str) -> str:
         return normalize_digits(account_raw or "")
+
+    def _parse_card_payment_info(account_raw: str):
+        raw = str(account_raw or "").strip()
+        compact = re.sub(r"\s+", "", raw)
+        if not compact or "/" not in compact:
+            return None
+
+        m = re.search(r"(\d{2})/(\d{2}|\d{4})$", compact)
+        if not m:
+            return None
+
+        exp_month = m.group(1)
+        exp_year_raw = m.group(2)
+        exp_year = exp_year_raw[-2:]
+
+        prefix = compact[:m.start()]
+        num_match = re.search(r"(\d{12,19})$", prefix)
+        if not num_match:
+            return None
+
+        card_digits = num_match.group(1)
+        company_raw = prefix[:num_match.start()]
+        company_raw = re.sub(r"[^가-힣A-Za-z]", "", company_raw).strip()
+
+        return {
+            "company_raw": company_raw,
+            "card_digits": card_digits,
+            "exp_month": exp_month,
+            "exp_year": exp_year,
+        }
+
+    def _normalize_card_company_query(company_raw: str) -> str:
+        s = re.sub(r"\s+", "", str(company_raw or "")).lower()
+        if not s:
+            return "BC카드"
+
+        pairs = [
+            ("카카오", "BC카드"),
+            ("kakao", "BC카드"),
+            ("비씨", "BC카드"),
+            ("bc", "BC카드"),
+            ("삼성", "삼성카드"),
+            ("신한", "신한카드"),
+            ("국민", "국민카드"),
+            ("kb", "국민카드"),
+            ("롯데", "롯데카드"),
+            ("엘지", "LG카드"),
+            ("lg", "LG카드"),
+            ("현대", "현대카드"),
+            ("농협", "NH카드"),
+            ("nh", "NH카드"),
+            ("우리", "우리카드"),
+            ("하나", "비자(하나카드포함)"),
+            ("비자", "비자(하나카드포함)"),
+            ("visa", "비자(하나카드포함)"),
+        ]
+
+        for key, val in pairs:
+            if key in s:
+                return val
+
+        return str(company_raw or "").strip() or "BC카드"
+
+    def _click_card_transfer_tab_if_needed() -> bool:
+        try:
+            if d(text="카드이체").exists:
+                ok = click_text_center(d, "카드이체", 0.05, 0.20)
+                time.sleep(1.2)
+                if ok:
+                    return True
+        except Exception:
+            pass
+
+        try:
+            if d(textContains="카드이체").exists:
+                d(textContains="카드이체").click()
+                time.sleep(1.2)
+                return True
+        except Exception:
+            pass
+
+        return True
+
+    def _open_card_company_picker() -> bool:
+        try:
+            if d(text="카드사 입력").exists:
+                ok = click_text_center(d, "카드사 입력", 0.10, 0.40)
+                time.sleep(1.2)
+                return ok
+        except Exception:
+            pass
+
+        try:
+            if d(textContains="카드사 입력").exists:
+                d(textContains="카드사 입력").click()
+                time.sleep(1.2)
+                return True
+        except Exception:
+            pass
+
+        label_obj = None
+
+        try:
+            if d(text="카드사").exists:
+                label_obj = d(text="카드사")
+            elif d(textContains="카드사").exists:
+                label_obj = d(textContains="카드사")
+        except Exception:
+            label_obj = None
+
+        if label_obj is not None:
+            try:
+                w, h = d.window_size()
+                b = label_obj.info.get("bounds", {})
+                bottom = int(b.get("bottom", 0))
+                field_y = min(h - 20, bottom + max(50, int(h * 0.03)))
+
+                for x in [int(w * 0.50), int(w * 0.78), int(w * 0.90)]:
+                    d.click(x, field_y)
+                    time.sleep(1.0)
+                    return True
+            except Exception:
+                pass
+
+        return False
+
+    def _wait_card_company_sheet_ready(timeout_sec: float = 6.0) -> bool:
+        end_at = time.time() + timeout_sec
+
+        while time.time() < end_at:
+            try:
+                if is_unexpected_digital_sales_home(d):
+                    return False
+
+                has_title = d(text="카드사 선택").exists or d(textContains="카드사 선택").exists
+                has_card = (
+                    d(text="BC카드").exists
+                    or d(text="삼성카드").exists
+                    or d(textContains="카드").exists
+                )
+
+                if has_title and has_card:
+                    print("✅ [ready_sign] 카드사 선택 시트 준비 완료")
+                    time.sleep(0.3)
+                    return True
+            except Exception:
+                pass
+
+            time.sleep(0.25)
+
+        print("❌ [ready_sign] 카드사 선택 시트 준비 실패")
+        return False
+
+    def _collect_visible_card_candidates():
+        items = _collect_visible_text_items(0.45, 0.98)
+
+        found = []
+        seen = set()
+
+        for it in items:
+            txt = str(it.get("text") or "").strip()
+            if not txt:
+                continue
+
+            txt_norm = re.sub(r"\s+", "", txt)
+            if not txt_norm:
+                continue
+
+            if "카드사선택" in txt_norm:
+                continue
+
+            if ("카드" not in txt_norm) and ("비자(" not in txt_norm):
+                continue
+
+            if txt_norm in seen:
+                continue
+            seen.add(txt_norm)
+
+            found.append({
+                "text": txt,
+                "bounds": it["bounds"],
+                "class_name": it.get("class_name", ""),
+            })
+
+        return found
+
+    def _card_match_score(query_norm: str, cand_norm: str) -> int:
+        if not query_norm or not cand_norm:
+            return 0
+
+        if cand_norm == query_norm:
+            return 100
+
+        if query_norm in cand_norm:
+            return 90
+
+        q_simple = query_norm.replace("카드", "")
+        c_simple = cand_norm.replace("카드", "")
+
+        if q_simple and c_simple and q_simple == c_simple:
+            return 85
+
+        if q_simple and q_simple in cand_norm:
+            return 80
+
+        if c_simple and c_simple in query_norm:
+            return 70
+
+        return 0
+
+    def _choose_card_from_picker(account_raw: str) -> bool:
+        info = _parse_card_payment_info(account_raw)
+        if info is None:
+            return _abort(f"전자서명 중단: 카드정보 파싱 실패 / 고객={job['name']} / 원본결제정보={account_raw}")
+
+        target_query = _normalize_card_company_query(info["company_raw"])
+        query_norm = re.sub(r"\s+", "", target_query)
+
+        print(f"🔎 [ready_sign] 카드사 선택 목표: {target_query}")
+
+        candidates = _collect_visible_card_candidates()
+
+        best_item = None
+        best_score = 0
+
+        for c in candidates:
+            cand_norm = re.sub(r"\s+", "", str(c["text"] or ""))
+            score = _card_match_score(query_norm, cand_norm)
+            if score > best_score:
+                best_score = score
+                best_item = c
+
+        if best_item is None or best_score <= 0:
+            for c in candidates:
+                cand_norm = re.sub(r"\s+", "", str(c["text"] or ""))
+                if cand_norm == "BC카드":
+                    best_item = c
+                    best_score = 1
+                    print("ℹ️ [ready_sign] 카드사 부분일치 없음 → BC카드 fallback")
+                    break
+
+        if best_item is None:
+            return _abort(f"전자서명 중단: 카드사 선택 실패 / 고객={job['name']} / 원본결제정보={account_raw}")
+
+        left, top, right, bottom = best_item["bounds"]
+        cx = (left + right) // 2
+        cy = (top + bottom) // 2
+        d.click(cx, cy)
+        time.sleep(1.2)
+
+        print(f"✅ [ready_sign] 카드사 선택 완료: {best_item['text']}")
+        return True
+
+    def _fill_card_number(account_raw: str) -> bool:
+        info = _parse_card_payment_info(account_raw)
+        if info is None:
+            return _abort(f"전자서명 중단: 카드정보 파싱 실패 / 고객={job['name']} / 원본결제정보={account_raw}")
+
+        card_digits = info["card_digits"]
+
+        edit = _find_edittext_near_label(["카드번호"], y_tolerance=90, y_below=170)
+        if edit is None:
+            return _abort(f"전자서명 중단: 카드번호 입력칸 미검출 / 고객={job['name']}")
+
+        current_digits = normalize_digits(_read_edit_obj_text(edit))
+        if current_digits == card_digits:
+            print(f"✅ [ready_sign] 카드번호 이미 입력 일치: {card_digits}")
+            return True
+
+        ok = type_into_edittext(d, edit, card_digits)
+        if not ok:
+            return _abort(f"전자서명 중단: 카드번호 입력 실패 / 고객={job['name']} / 카드번호={card_digits}")
+
+        time.sleep(0.8)
+
+        current_digits = normalize_digits(_read_edit_obj_text(edit))
+        if current_digits != card_digits:
+            return _abort(f"전자서명 중단: 카드번호 입력값 불일치 / 고객={job['name']} / 기대={card_digits} / 현재={current_digits}")
+
+        print(f"✅ [ready_sign] 카드번호 입력 완료: {card_digits}")
+        return True
+
+    def _find_card_expiry_edittexts():
+        label_obj = _find_first_label_obj(["유효 기간", "유효기간"])
+        if label_obj is None:
+            return (None, None)
+
+        try:
+            b = label_obj.info.get("bounds", {})
+            label_bottom = int(b.get("bottom", 0))
+        except Exception:
+            return (None, None)
+
+        try:
+            edits = d(className="android.widget.EditText")
+            cnt = edits.count
+        except Exception:
+            cnt = 0
+
+        candidates = []
+        for i in range(cnt):
+            try:
+                e = edits[i]
+                eb = e.info.get("bounds", {})
+                left = int(eb.get("left", 0))
+                top = int(eb.get("top", 0))
+                right = int(eb.get("right", 0))
+                bottom = int(eb.get("bottom", 0))
+                width = right - left
+
+                if top < label_bottom - 10 or top > label_bottom + 180:
+                    continue
+                if width < 80:
+                    continue
+
+                candidates.append({
+                    "obj": e,
+                    "left": left,
+                    "top": top,
+                })
+            except Exception:
+                continue
+
+        candidates.sort(key=lambda x: (x["top"], x["left"]))
+        if len(candidates) < 2:
+            return (None, None)
+
+        first_top = candidates[0]["top"]
+        same_row = [c for c in candidates if abs(c["top"] - first_top) <= 24]
+        same_row.sort(key=lambda x: x["left"])
+
+        if len(same_row) < 2:
+            return (None, None)
+
+        return (same_row[0]["obj"], same_row[1]["obj"])
+
+    def _fill_card_expiry(account_raw: str) -> bool:
+        info = _parse_card_payment_info(account_raw)
+        if info is None:
+            return _abort(f"전자서명 중단: 카드 유효기간 파싱 실패 / 고객={job['name']} / 원본결제정보={account_raw}")
+
+        month_edit, year_edit = _find_card_expiry_edittexts()
+        if month_edit is None or year_edit is None:
+            return _abort(f"전자서명 중단: 카드 유효기간 입력칸 미검출 / 고객={job['name']}")
+
+        if not type_into_edittext(d, month_edit, info["exp_month"]):
+            return _abort(f"전자서명 중단: 카드 유효기간 월 입력 실패 / 고객={job['name']} / 월={info['exp_month']}")
+
+        time.sleep(0.4)
+
+        month_now = normalize_digits(_read_edit_obj_text(month_edit))
+        if month_now != info["exp_month"]:
+            return _abort(f"전자서명 중단: 카드 유효기간 월 입력값 불일치 / 고객={job['name']} / 기대={info['exp_month']} / 현재={month_now}")
+
+        if not type_into_edittext(d, year_edit, info["exp_year"]):
+            return _abort(f"전자서명 중단: 카드 유효기간 연도 입력 실패 / 고객={job['name']} / 연도={info['exp_year']}")
+
+        time.sleep(0.4)
+
+        year_now = normalize_digits(_read_edit_obj_text(year_edit))
+        if year_now != info["exp_year"]:
+            return _abort(f"전자서명 중단: 카드 유효기간 연도 입력값 불일치 / 고객={job['name']} / 기대={info['exp_year']} / 현재={year_now}")
+
+        print(f"✅ [ready_sign] 카드 유효기간 입력 완료: {info['exp_month']}/{info['exp_year']}")
+        return True
 
     def _read_edit_obj_text(obj) -> str:
         try:
@@ -6229,19 +6590,35 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
                     return _abort(f"전자서명 중단: 결제수단 추가 화면 진입 실패 / 고객={job['name']}")
 
                 if _is_card_expiry_like(account_raw):
-                    return _abort(f"전자서명 중단: 카드이체 결제정보는 아직 미구현 / 고객={job['name']} / 원본결제정보={account_raw}")
+                    if not _click_card_transfer_tab_if_needed():
+                        return _abort(f"전자서명 중단: 카드이체 탭 선택 실패 / 고객={job['name']} / 원본결제정보={account_raw}")
 
-                if not _click_bank_transfer_tab_if_needed(account_raw):
-                    return _abort(f"전자서명 중단: 은행이체 탭 선택 실패 / 고객={job['name']} / 원본결제정보={account_raw}")
+                    if not _open_card_company_picker():
+                        return _abort(f"전자서명 중단: 카드사 입력 선택창 열기 실패 / 고객={job['name']} / 원본결제정보={account_raw}")
 
-                if not _open_bank_picker():
-                    return _abort(f"전자서명 중단: 은행입력 선택창 열기 실패 / 고객={job['name']} / 원본결제정보={account_raw}")
+                    if not _wait_card_company_sheet_ready(timeout_sec=6.0):
+                        return _abort(f"전자서명 중단: 카드사 선택 시트 미검출 / 고객={job['name']} / 원본결제정보={account_raw}")
 
-                if not _choose_bank_from_picker(account_raw):
-                    return False
+                    if not _choose_card_from_picker(account_raw):
+                        return False
 
-                if not _fill_bank_account_number(account_raw):
-                    return False
+                    if not _fill_card_number(account_raw):
+                        return False
+
+                    if not _fill_card_expiry(account_raw):
+                        return False
+                else:
+                    if not _click_bank_transfer_tab_if_needed(account_raw):
+                        return _abort(f"전자서명 중단: 은행이체 탭 선택 실패 / 고객={job['name']} / 원본결제정보={account_raw}")
+
+                    if not _open_bank_picker():
+                        return _abort(f"전자서명 중단: 은행입력 선택창 열기 실패 / 고객={job['name']} / 원본결제정보={account_raw}")
+
+                    if not _choose_bank_from_picker(account_raw):
+                        return False
+
+                    if not _fill_bank_account_number(account_raw):
+                        return False
 
                 if not _click_payment_method_submit():
                     return _abort(f"전자서명 중단: 결제수단 추가하기 버튼 클릭 실패 / 고객={job['name']}")
