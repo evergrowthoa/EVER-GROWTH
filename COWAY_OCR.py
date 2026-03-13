@@ -5587,6 +5587,8 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
         return False
 
     def _pick_earliest_visit_slot_and_done() -> bool:
+        import xml.etree.ElementTree as ET
+
         if not _open_install_datetime_selector():
             return _abort(f"전자서명 중단: 설치희망일시 선택 열기 실패 / 고객={job['name']}")
 
@@ -5596,62 +5598,226 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
         if not _wait_fast_install_sheet_ready(timeout_sec=5.0):
             return _abort(f"전자서명 중단: 방문 희망일시 선택 시트 미검출 / 고객={job['name']}")
 
-        items = _collect_visible_text_items(0.10, 0.74)
-
-        slot_candidates = []
-        for it in items:
-            txt = str(it["text"] or "").strip()
-            if txt not in ["○", "◯"]:
-                continue
-
-            left, top, right, bottom = it["bounds"]
-
-            slot_candidates.append({
-                "text": txt,
-                "bounds": (left, top, right, bottom),
-            })
-
-        slot_candidates.sort(key=lambda x: (x["bounds"][1], x["bounds"][0]))
-
-        if not slot_candidates:
-            return _abort(f"전자서명 중단: 방문 희망일시 선택 가능 슬롯 미검출 / 고객={job['name']}")
-
-        chosen = slot_candidates[0]
-        left, top, right, bottom = chosen["bounds"]
-        cx = (left + right) // 2
-        cy = (top + bottom) // 2
-        d.click(cx, cy)
-        time.sleep(1.0)
-
-        clicked_done = False
-
-        for _ in range(8):
+        def _done_visible() -> bool:
             try:
                 if d(text="선택완료").exists:
-                    d(text="선택완료").click()
-                    clicked_done = True
-                    break
+                    return True
             except Exception:
                 pass
-
             try:
                 if d(textContains="선택완료").exists:
-                    d(textContains="선택완료").click()
-                    clicked_done = True
-                    break
+                    return True
             except Exception:
                 pass
+            return False
+
+        def _click_done() -> bool:
+            for _ in range(8):
+                try:
+                    if d(text="선택완료").exists:
+                        d(text="선택완료").click()
+                        return True
+                except Exception:
+                    pass
+
+                try:
+                    if d(textContains="선택완료").exists:
+                        d(textContains="선택완료").click()
+                        return True
+                except Exception:
+                    pass
+
+                try:
+                    if click_text_center(d, "선택완료", 0.82, 0.99):
+                        return True
+                except Exception:
+                    pass
+
+                time.sleep(0.3)
+
+            return False
+
+        def _parse_bounds(bounds_str: str):
+            m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", str(bounds_str or ""))
+            if not m:
+                return None
+            return tuple(int(x) for x in m.groups())
+
+        def _collect_clickable_slot_points():
+            points = []
 
             try:
-                if click_text_center(d, "선택완료", 0.82, 0.99):
-                    clicked_done = True
+                w, h = d.window_size()
+            except Exception:
+                w, h = (1080, 1920)
+
+            try:
+                xml = d.dump_hierarchy()
+                root = ET.fromstring(xml)
+            except Exception:
+                return []
+
+            bad_terms = [
+                "방문 희망일시 선택",
+                "방문희망일시선택",
+                "선택완료",
+                "더보기",
+                "휴일",
+                "마감",
+                "오전",
+                "오후",
+            ]
+
+            for node in root.iter("node"):
+                try:
+                    clickable = str(node.attrib.get("clickable", "false")).lower() == "true"
+                    enabled = str(node.attrib.get("enabled", "true")).lower() == "true"
+                    if not clickable or not enabled:
+                        continue
+
+                    text = str(node.attrib.get("text", "") or "").strip()
+                    desc = str(node.attrib.get("content-desc", "") or "").strip()
+                    merged = f"{text} {desc}".strip()
+
+                    if any(t in merged for t in bad_terms):
+                        continue
+
+                    bounds = _parse_bounds(node.attrib.get("bounds", ""))
+                    if not bounds:
+                        continue
+
+                    left, top, right, bottom = bounds
+                    width = right - left
+                    height = bottom - top
+                    cx = (left + right) // 2
+                    cy = (top + bottom) // 2
+
+                    if width < 28 or height < 28:
+                        continue
+
+                    if cx < int(w * 0.28) or cx > int(w * 0.96):
+                        continue
+                    if cy < int(h * 0.16) or cy > int(h * 0.62):
+                        continue
+
+                    points.append({
+                        "x": cx,
+                        "y": cy,
+                        "top": top,
+                        "left": left,
+                    })
+                except Exception:
+                    continue
+
+            points.sort(key=lambda x: (x["top"], x["left"]))
+
+            unique = []
+            for p in points:
+                duplicated = False
+                for u in unique:
+                    if abs(p["x"] - u["x"]) <= 12 and abs(p["y"] - u["y"]) <= 12:
+                        duplicated = True
+                        break
+                if not duplicated:
+                    unique.append(p)
+
+            return unique
+
+        def _cluster_positions(values, gap=40):
+            values = sorted(values)
+            if not values:
+                return []
+
+            clusters = [[values[0]]]
+            for v in values[1:]:
+                if abs(v - clusters[-1][-1]) <= gap:
+                    clusters[-1].append(v)
+                else:
+                    clusters.append([v])
+
+            return [int(sum(c) / len(c)) for c in clusters]
+
+        def _extract_date_token(txt: str) -> str:
+            m = re.search(r"(\d{1,2}\.\d{1,2})", str(txt or ""))
+            return m.group(1) if m else ""
+
+        def _has_time_token(txt: str) -> bool:
+            return bool(re.search(r"\d{1,2}:\d{2}", str(txt or "")))
+
+        def _collect_grid_fallback_points():
+            items = _collect_visible_text_items(0.08, 0.78)
+
+            try:
+                w, h = d.window_size()
+            except Exception:
+                w, h = (1080, 1920)
+
+            row_map = {}
+            time_xs = []
+
+            for it in items:
+                raw_txt = str(it.get("text") or "")
+                txt = re.sub(r"\s+", " ", raw_txt).strip()
+                left, top, right, bottom = it["bounds"]
+                cx = (left + right) // 2
+                cy = (top + bottom) // 2
+
+                date_token = _extract_date_token(txt)
+                if date_token:
+                    prev = row_map.get(date_token)
+                    if prev is None or top < prev["top"]:
+                        row_map[date_token] = {
+                            "y": cy,
+                            "top": top,
+                            "left": left,
+                            "token": date_token,
+                        }
+
+                if _has_time_token(txt):
+                    if cx > int(w * 0.34) and top < int(h * 0.22):
+                        time_xs.append(cx)
+
+            row_items = sorted(row_map.values(), key=lambda x: x["top"])
+            col_centers = _cluster_positions(time_xs, gap=45)
+
+            points = []
+            for row in row_items:
+                for x in col_centers:
+                    points.append({
+                        "x": x,
+                        "y": row["y"],
+                        "top": row["top"],
+                        "left": x,
+                    })
+
+            points.sort(key=lambda x: (x["top"], x["left"]))
+            return points
+
+        candidate_points = _collect_clickable_slot_points()
+        if not candidate_points:
+            candidate_points = _collect_grid_fallback_points()
+
+        if not candidate_points:
+            return _abort(f"전자서명 중단: 방문 희망일시 선택 후보 좌표 생성 실패 / 고객={job['name']}")
+
+        selected = False
+
+        for idx, p in enumerate(candidate_points, start=1):
+            try:
+                d.click(int(p["x"]), int(p["y"]))
+                time.sleep(0.7)
+
+                if _done_visible():
+                    print(f"✅ [ready_sign] 방문 희망일시 후보 선택 성공 #{idx}: ({int(p['x'])}, {int(p['y'])})")
+                    selected = True
                     break
             except Exception:
-                pass
+                continue
 
-            time.sleep(0.3)
+        if not selected:
+            return _abort(f"전자서명 중단: 방문 희망일시 선택 가능 슬롯 미검출 / 고객={job['name']}")
 
-        if not clicked_done:
+        if not _click_done():
             return _abort(f"전자서명 중단: 방문 희망일시 선택완료 클릭 실패 / 고객={job['name']}")
 
         time.sleep(1.2)
