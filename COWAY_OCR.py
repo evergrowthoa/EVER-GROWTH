@@ -13,12 +13,14 @@ import sqlite3
 import threading
 import queue
 import traceback
+import json
+import urllib.request
+import urllib.error
 import tkinter as tk
 from tkinter import ttk
 
 import uiautomator2 as u2
 
-import uiautomator2 as u2
 BUILD_ID = "COWAY_OCR_BUILD_2026-03-05_006"
 print("✅ BUILD:", BUILD_ID)
 
@@ -37,6 +39,32 @@ AUTH_RETRY_MAX = 3
 ORDER_REENTER_INTERVAL_SEC = 90
 SEARCH_BATCH_PER_CYCLE = 3
 SEARCH_LOOP_SLEEP_SEC = 2.0
+
+# ===========================
+# 알림 설정
+# ===========================
+# 지금은 담당자 미지정 상태라 me / staff 둘 다 같은 곳으로 보냄
+# 나중에 담당자 정해지면 STAFF 쪽 값만 바꾸면 됨
+
+ENABLE_TELEGRAM_NOTIFY = True
+ENABLE_SLACK_NOTIFY = False
+
+# Telegram
+# 예: 1234567890:AAxxxx...
+TELEGRAM_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
+
+# 예: 개인 chat_id
+TELEGRAM_CHAT_ID_ME = os.environ.get("TG_CHAT_ID_ME", "").strip()
+
+# 아직 담당자 미정 → 기본값은 내 chat_id 재사용
+TELEGRAM_CHAT_ID_STAFF = os.environ.get("TG_CHAT_ID_STAFF", "").strip() or TELEGRAM_CHAT_ID_ME
+
+# Slack Incoming Webhook
+SLACK_WEBHOOK_ME = os.environ.get("SLACK_WEBHOOK_ME", "").strip()
+SLACK_WEBHOOK_STAFF = os.environ.get("SLACK_WEBHOOK_STAFF", "").strip() or SLACK_WEBHOOK_ME
+
+# 알림 제목 prefix
+NOTIFY_PREFIX = "[COWAY 자동화]"
 
 STATUS_NEW = "신규"
 STATUS_AUTH_SENT = "인증발송"
@@ -65,15 +93,119 @@ SIGN_IN_PROGRESS = False
 STOP_FLAG = False
 LAST_STOP_REASON = ""
 
-def notify(msg: str):
+def _post_json(url: str, payload: dict, timeout_sec: float = 10.0):
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json; charset=utf-8"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+        return resp.read().decode("utf-8", errors="ignore")
+
+def _send_telegram_message(chat_id: str, text: str) -> bool:
+    token = str(TELEGRAM_BOT_TOKEN or "").strip()
+    chat_id = str(chat_id or "").strip()
+    if not ENABLE_TELEGRAM_NOTIFY:
+        return False
+    if not token or not chat_id:
+        return False
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text[:4000],
+    }
+
+    try:
+        _post_json(url, payload, timeout_sec=10.0)
+        return True
+    except Exception as e:
+        print("⚠️ [notify] Telegram 전송 실패:", e)
+        return False
+
+def _send_slack_message(webhook_url: str, text: str) -> bool:
+    webhook_url = str(webhook_url or "").strip()
+    if not ENABLE_SLACK_NOTIFY:
+        return False
+    if not webhook_url:
+        return False
+
+    payload = {
+        "text": text
+    }
+
+    try:
+        _post_json(webhook_url, payload, timeout_sec=10.0)
+        return True
+    except Exception as e:
+        print("⚠️ [notify] Slack 전송 실패:", e)
+        return False
+
+def _build_notify_text(msg: str, level: str = "info") -> str:
+    icon = "🔔"
+    lv = str(level or "info").strip().lower()
+
+    if lv in ["error", "err", "fail", "stop"]:
+        icon = "🛑"
+    elif lv in ["success", "done", "ok"]:
+        icon = "✅"
+    elif lv in ["warn", "warning", "hold"]:
+        icon = "⚠️"
+    elif lv in ["progress", "status"]:
+        icon = "📌"
+
+    now_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    return f"{icon} {NOTIFY_PREFIX}\n시간: {now_str}\n메시지: {msg}"
+
+def notify(msg: str, audience: str = "both", level: str = "info"):
+    text = _build_notify_text(msg, level=level)
     print("🔔", msg)
+
+    audience = str(audience or "both").strip().lower()
+
+    telegram_targets = []
+    slack_targets = []
+
+    if audience in ["me", "both", "all"]:
+        if TELEGRAM_CHAT_ID_ME:
+            telegram_targets.append(TELEGRAM_CHAT_ID_ME)
+        if SLACK_WEBHOOK_ME:
+            slack_targets.append(SLACK_WEBHOOK_ME)
+
+    if audience in ["staff", "both", "all"]:
+        if TELEGRAM_CHAT_ID_STAFF:
+            telegram_targets.append(TELEGRAM_CHAT_ID_STAFF)
+        if SLACK_WEBHOOK_STAFF:
+            slack_targets.append(SLACK_WEBHOOK_STAFF)
+
+    # 중복 제거
+    telegram_targets = list(dict.fromkeys([x for x in telegram_targets if x]))
+    slack_targets = list(dict.fromkeys([x for x in slack_targets if x]))
+
+    for chat_id in telegram_targets:
+        _send_telegram_message(chat_id, text)
+
+    for webhook_url in slack_targets:
+        _send_slack_message(webhook_url, text)
+
+def notify_error(msg: str):
+    notify(msg, audience="me", level="error")
+
+def notify_progress(msg: str):
+    # 현재는 담당자 미지정이라 staff도 내 chat_id로 감
+    notify(msg, audience="staff", level="progress")
+
+def notify_success(msg: str):
+    notify(msg, audience="staff", level="success")
 
 def set_stop(reason: str):
     global STOP_FLAG, LAST_STOP_REASON
     STOP_FLAG = True
     LAST_STOP_REASON = str(reason or "").strip()
     print("🛑 자동화 중단:", reason)
-    notify(reason)
+    notify_error(reason)
 
 def clear_stop():
     global STOP_FLAG, LAST_STOP_REASON
@@ -6843,7 +6975,7 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
         if resume_result is True:
             SIGN_IN_PROGRESS = True
             sign_started.add(job["phone11"])
-            notify(
+            notify_success(
                 f"전자서명 재진행 완료: {job['name']} / {job['phone11']} / 시작상태={target_status}"
             )
             print(f"✅ [ready_sign] 현재 단계({target_status})부터 재진행 완료: {job['name']}")
@@ -6894,7 +7026,7 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
 
         SIGN_IN_PROGRESS = True
         sign_started.add(job["phone11"])
-        notify(
+        notify_success(
             f"전자서명 결제정보/설치주소 단계 완료: {job['name']} / {job['phone11']} / 결제정보={account_raw} / 우편번호={zipcode} / 기본주소={address_basic} / 상세주소={address_detail}"
         )
         print(f"✅ [ready_sign] 상품검색/색상/렌탈/관리/약정/할인검증/결제정보추가/계좌번호입력/설치주소입력 완료: {job['name']}")
@@ -7067,8 +7199,8 @@ def emulator_main_loop():
                         if saved:
                             with jobs_lock:
                                 auth_sent_jobs[saved["phone11"]] = dict(saved)
-                        print(f"✅ 인증발송 성공: {job['name']} / {job['phone11']} (최초 상태체크 60초 후)")
-                        notify(f"인증발송 성공: {job['name']} / {job['phone11']} (최초 상태체크 60초 후)")
+print(f"✅ 인증발송 성공: {job['name']} / {job['phone11']} (최초 상태체크 60초 후)")
+notify_progress(f"인증발송 성공: {job['name']} / {job['phone11']} (최초 상태체크 60초 후)")
                     else:
                         if reason in ["APP_RESTART_FAIL", "NOT_READY", "UNEXPECTED_HOME"] and retry < AUTH_RETRY_MAX:
                             retry += 1
@@ -7159,7 +7291,7 @@ def emulator_main_loop():
                         with jobs_lock:
                             auth_sent_jobs.pop(phone11, None)
                         sign_started.add(phone11)
-                        notify(f"✅ 진행 재개/완료: {j['name']} / {j['phone11']} / 시작상태={st}")
+                        notify_success(f"진행 재개/완료: {j['name']} / {j['phone11']} / 시작상태={st}")        
                     else:
                         if LAST_STOP_REASON:
                             db_mark_hold(phone11, LAST_STOP_REASON)
