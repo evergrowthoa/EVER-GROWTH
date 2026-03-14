@@ -51,10 +51,10 @@ ENABLE_SLACK_NOTIFY = False
 
 # Telegram
 # 예: 1234567890:AAxxxx...
-TELEGRAM_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
+TELEGRAM_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "8777418618:AAGNdHu1C6Lz5yQJn8XqihCxWhEUp8Ao408").strip()
 
 # 예: 개인 chat_id
-TELEGRAM_CHAT_ID_ME = os.environ.get("TG_CHAT_ID_ME", "").strip()
+TELEGRAM_CHAT_ID_ME = os.environ.get("TG_CHAT_ID_ME", "8759444041").strip()
 
 # 아직 담당자 미정 → 기본값은 내 chat_id 재사용
 TELEGRAM_CHAT_ID_STAFF = os.environ.get("TG_CHAT_ID_STAFF", "").strip() or TELEGRAM_CHAT_ID_ME
