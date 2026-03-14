@@ -51,7 +51,7 @@ ENABLE_SLACK_NOTIFY = False
 
 # Telegram
 # 예: 1234567890:AAxxxx...
-TELEGRAM_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "8777418618:AAGNdHu1C6Lz5yQJn8XqihCxWhEUp8Ao408").strip()
+TELEGRAM_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "8777418618:AAGNdHu1C6Lz5yQJn8Xq1hCxWhEUp8Ao4O8").strip()
 
 # 예: 개인 chat_id
 TELEGRAM_CHAT_ID_ME = os.environ.get("TG_CHAT_ID_ME", "8759444041").strip()
@@ -7199,8 +7199,8 @@ def emulator_main_loop():
                         if saved:
                             with jobs_lock:
                                 auth_sent_jobs[saved["phone11"]] = dict(saved)
-print(f"✅ 인증발송 성공: {job['name']} / {job['phone11']} (최초 상태체크 60초 후)")
-notify_progress(f"인증발송 성공: {job['name']} / {job['phone11']} (최초 상태체크 60초 후)")
+                                print(f"✅ 인증발송 성공: {job['name']} / {job['phone11']} (최초 상태체크 60초 후)")
+                                notify_progress(f"인증발송 성공: {job['name']} / {job['phone11']} (최초 상태체크 60초 후)")
                     else:
                         if reason in ["APP_RESTART_FAIL", "NOT_READY", "UNEXPECTED_HOME"] and retry < AUTH_RETRY_MAX:
                             retry += 1
