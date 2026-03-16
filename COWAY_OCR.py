@@ -4651,25 +4651,47 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
     def _is_payment_error_popup_open() -> bool:
         texts = _collect_popup_texts(0.20, 0.82)
         joined = " ".join(texts)
+        joined_norm = re.sub(r"\s+", "", joined)
 
-        if not joined:
+        if not joined_norm:
             return False
-
-        error_fragments = [
-            "오류",
-            "센터계좌체계오류",
-            "결제정보",
-            "계좌",
-            "입력값",
-            "불가",
-            "실패",
-        ]
 
         if _is_prev_stage_move_popup_open():
             return False
 
+        normal_fragments = [
+            "결제정보선택",
+            "정기결제수단",
+            "카드계좌확인되었습니다",
+            "은행계좌확인되었습니다",
+            "카드이체",
+            "은행이체",
+            "추가하기",
+            "다음",
+        ]
+
+        for frag in normal_fragments:
+            if frag in joined_norm:
+                return False
+
+        error_fragments = [
+            "오류",
+            "센터계좌체계오류",
+            "입력값오류",
+            "입력오류",
+            "결제정보오류",
+            "등록불가",
+            "처리불가",
+            "이용불가",
+            "실패",
+            "유효하지않",
+            "유효하지않습니다",
+            "다시입력",
+            "확인후다시",
+        ]
+
         for frag in error_fragments:
-            if re.sub(r"\s+", "", frag) in joined:
+            if frag in joined_norm:
                 return True
 
         return False
@@ -4705,18 +4727,18 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
                 time.sleep(0.8)
                 continue
 
+            if _wait_payment_info_ready(timeout_sec=1.2):
+                print(f"✅ [ready_sign] 결제수단 추가 후 결제정보 선택 화면 복귀 확인: {job['name']}")
+                return True
+
+            if _wait_install_info_ready(timeout_sec=1.2):
+                print(f"✅ [ready_sign] 결제수단 추가 후 설치정보 화면 진입 확인: {job['name']}")
+                return True
+
             if _is_payment_error_popup_open():
                 popup_msg = _popup_message_for_log()
                 _click_confirm_if_exists()
                 return _abort(f"결제정보 오류 / 고객={job['name']} / 팝업={popup_msg}")
-
-            if _wait_payment_info_ready(timeout_sec=1.5):
-                print(f"✅ [ready_sign] 결제수단 추가 후 결제정보 선택 화면 복귀 확인: {job['name']}")
-                return True
-
-            if _wait_install_info_ready(timeout_sec=1.5):
-                print(f"✅ [ready_sign] 결제수단 추가 후 설치정보 화면 진입 확인: {job['name']}")
-                return True
 
             time.sleep(0.3)
 
