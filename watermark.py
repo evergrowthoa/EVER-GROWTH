@@ -173,6 +173,7 @@ def init_db():
                     channel_id TEXT DEFAULT '',
                     thread_ts TEXT DEFAULT '',
                     slack_user_id TEXT DEFAULT '',
+                    slack_user_name TEXT DEFAULT '',
                     watermark8 TEXT DEFAULT '',
                     status TEXT DEFAULT '',
                     last_error TEXT DEFAULT '',
@@ -196,6 +197,7 @@ def init_db():
 
             alter_columns = [
                 ("slack_user_id", "TEXT DEFAULT ''"),
+                ("slack_user_name", "TEXT DEFAULT ''"),
                 ("replied_at", "REAL DEFAULT 0"),
                 ("reply_done", "INTEGER DEFAULT 0"),
             ]
@@ -211,31 +213,46 @@ def init_db():
             conn.close()
 
 
-def db_has_seen_message(message_ts: str) -> bool:
-    with db_lock:
-        conn = _db_conn()
-        try:
-            cur = conn.execute("SELECT 1 FROM slack_seen WHERE message_ts = ?", (message_ts,))
-            return cur.fetchone() is not None
-        finally:
-            conn.close()
-
-
-def db_mark_seen_message(message_ts: str, raw_text: str, watermark8: str):
+def db_create_job(message_ts: str, channel_id: str, thread_ts: str, slack_user_id: str, slack_user_name: str, watermark8: str):
     now = time.time()
     with db_lock:
         conn = _db_conn()
         try:
             conn.execute("""
-                INSERT OR IGNORE INTO slack_seen (message_ts, raw_text, matched_watermark8, created_at)
-                VALUES (?, ?, ?, ?)
+                INSERT OR IGNORE INTO jobs (
+                    message_ts, channel_id, thread_ts, slack_user_id, slack_user_name, watermark8,
+                    status, last_error, replied_at, reply_done, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 str(message_ts or "").strip(),
-                str(raw_text or "").strip(),
+                str(channel_id or "").strip(),
+                str(thread_ts or "").strip(),
+                str(slack_user_id or "").strip(),
+                str(slack_user_name or "").strip(),
                 str(watermark8 or "").strip(),
+                "대기",
+                "",
+                0,
+                0,
+                now,
                 now,
             ))
             conn.commit()
+        finally:
+            conn.close()
+
+
+def db_list_recent_jobs(limit: int = 300):
+    with db_lock:
+        conn = _db_conn()
+        try:
+            cur = conn.execute("""
+                SELECT *
+                FROM jobs
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+            """, (int(limit),))
+            return [dict(r) for r in cur.fetchall()]
         finally:
             conn.close()
 
@@ -363,7 +380,7 @@ def job_processed_text(status_value: str) -> str:
 
 def job_duplicate_text(status_value: str) -> str:
     s = str(status_value or "").strip()
-    return "중복" if s == "중복팝업" else "아님"
+    return "중복" if s == "중복팝업" else "사용가능"
 
 
 def db_has_seen_message(message_ts: str) -> bool:
@@ -470,10 +487,45 @@ def db_list_waiting_jobs():
 # =========================
 def extract_watermark8(text: str) -> str:
     s = str(text or "").strip()
-    m = re.fullmatch(r"물마크\s+(\d{8})", s)
+    m = re.fullmatch(r"물마크\s?(\d{8})", s)
     if not m:
         return ""
     return m.group(1)
+
+
+SLACK_USER_NAME_CACHE = {}
+
+
+def slack_resolve_user_name(slack_user_id: str) -> str:
+    slack_user_id = str(slack_user_id or "").strip()
+    if not slack_user_id:
+        return ""
+
+    cached = SLACK_USER_NAME_CACHE.get(slack_user_id, "")
+    if cached:
+        return cached
+
+    if not slack_client:
+        return ""
+
+    try:
+        resp = slack_client.users_info(user=slack_user_id)
+        user = resp.get("user", {}) or {}
+        profile = user.get("profile", {}) or {}
+
+        display_name = str(profile.get("display_name") or "").strip()
+        real_name = str(profile.get("real_name") or "").strip()
+        name = str(user.get("name") or "").strip()
+
+        resolved = display_name or real_name or name or slack_user_id
+        SLACK_USER_NAME_CACHE[slack_user_id] = resolved
+        return resolved
+    except SlackApiError as e:
+        print("⚠️ Slack 사용자명 조회 실패:", e)
+        return ""
+    except Exception as e:
+        print("⚠️ Slack 사용자명 조회 예외:", e)
+        return ""
 
 
 def slack_reply_in_thread(channel_id: str, thread_ts: str, text: str):
@@ -540,15 +592,24 @@ def slack_poll_loop():
                 db_mark_seen_message(message_ts, raw_text, watermark8)
 
                 if not watermark8:
+                    print(f"⚠️ Slack 양식불일치: ts={message_ts} / text={raw_text}")
+                    slack_reply_in_thread(
+                        channel_id=SLACK_CHANNEL_ID,
+                        thread_ts=thread_ts,
+                        text="조회요청 양식확인부탁드립니다.",
+                    )
                     continue
 
-                print(f"📥 Slack 조회요청 감지: ts={message_ts} / 물마크={watermark8} / user={slack_user_id}")
+                slack_user_name = slack_resolve_user_name(slack_user_id)
+
+                print(f"📥 Slack 조회요청 감지: ts={message_ts} / 물마크={watermark8} / user={slack_user_id} / name={slack_user_name}")
 
                 db_create_job(
                     message_ts=message_ts,
                     channel_id=SLACK_CHANNEL_ID,
                     thread_ts=thread_ts,
                     slack_user_id=slack_user_id,
+                    slack_user_name=slack_user_name,
                     watermark8=watermark8,
                 )
 
@@ -558,9 +619,9 @@ def slack_poll_loop():
                     slack_reply_in_thread(
                         channel_id=SLACK_CHANNEL_ID,
                         thread_ts=thread_ts,
-                        text=f"조회 접수 / 물마크 {watermark8}",
+                        text=f"물마크 {watermark8}",
                     )
-                    notify_progress(f"Slack 조회 접수: 물마크 {watermark8}")
+                    notify_progress(f"Slack 물마크 {watermark8}")
 
         except Exception as e:
             print("❌ Slack polling 예외:", e)
@@ -1166,79 +1227,73 @@ def screenshots_dir():
     return path
 
 
-def _resolve_adb_executable() -> str:
-    candidates = []
-
-    for env_key in ["ADB_EXE", "ADB_PATH"]:
-        v = str(os.environ.get(env_key) or "").strip().strip('"')
-        if v:
-            candidates.append(v)
-
-    for cmd in ["adb", "adb.exe"]:
-        found = shutil.which(cmd)
-        if found:
-            candidates.append(found)
-
-    sdk_roots = [
-        str(os.environ.get("ANDROID_SDK_ROOT") or "").strip(),
-        str(os.environ.get("ANDROID_HOME") or "").strip(),
-        os.path.join(str(os.environ.get("LOCALAPPDATA") or "").strip(), "Android", "Sdk"),
-        os.path.join(os.path.expanduser("~"), "AppData", "Local", "Android", "Sdk"),
-    ]
-
-    for root in sdk_roots:
-        if not root:
-            continue
-        candidates.append(os.path.join(root, "platform-tools", "adb.exe"))
-        candidates.append(os.path.join(root, "platform-tools", "adb"))
-
-    seen = set()
-    for c in candidates:
-        cc = str(c or "").strip().strip('"')
-        if not cc:
-            continue
-        cc = os.path.normpath(cc)
-        if cc in seen:
-            continue
-        seen.add(cc)
-        if os.path.isfile(cc):
-            return cc
-
-    return ""
-
-
 def save_device_screenshot(d, prefix: str, watermark8: str) -> str:
     stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
     filename = f"{prefix}_{watermark8}_{stamp}.png"
-    path = os.path.join(screenshots_dir(), filename)
-
-    adb_exe = _resolve_adb_executable()
-    if not adb_exe:
-        print("⚠️ 캡처 실패: adb.exe 경로를 찾지 못함")
-        return ""
+    local_path = os.path.join(screenshots_dir(), filename)
+    remote_path = f"/sdcard/{filename}"
 
     try:
-        result = subprocess.run(
-            [adb_exe, "-s", ADB_SERIAL, "exec-out", "screencap", "-p"],
-            capture_output=True,
-            timeout=15,
-        )
+        try:
+            d.shell(f"rm -f {remote_path}")
+        except Exception:
+            pass
 
-        if result.returncode != 0:
-            err = (result.stderr or b"").decode("utf-8", errors="ignore").strip()
-            print("⚠️ 캡처 실패: adb screencap 비정상 종료", err)
+        shot_ok = False
+
+        try:
+            res = d.shell(f"screencap -p {remote_path}")
+            shot_ok = True
+        except Exception as e:
+            print("⚠️ 캡처 1차 실패:", e)
+            shot_ok = False
+
+        if not shot_ok:
+            try:
+                d.shell(["sh", "-c", f"screencap -p {remote_path}"])
+                shot_ok = True
+            except Exception as e:
+                print("⚠️ 캡처 2차 실패:", e)
+                shot_ok = False
+
+        if not shot_ok:
+            print("⚠️ 캡처 실패: 기기 내부 screencap 실행 실패")
             return ""
 
-        png_bytes = result.stdout or b""
-        if not png_bytes.startswith(b"\x89PNG"):
+        pulled = False
+
+        try:
+            d.pull(remote_path, local_path)
+            pulled = True
+        except Exception as e:
+            print("⚠️ 캡처 pull 실패:", e)
+            pulled = False
+
+        try:
+            d.shell(f"rm -f {remote_path}")
+        except Exception:
+            pass
+
+        if not pulled:
+            return ""
+
+        if not os.path.isfile(local_path):
+            print("⚠️ 캡처 실패: 로컬 파일 없음")
+            return ""
+
+        if os.path.getsize(local_path) <= 0:
+            print("⚠️ 캡처 실패: 로컬 파일 크기 0")
+            return ""
+
+        with open(local_path, "rb") as f:
+            header = f.read(8)
+
+        if not header.startswith(b"\x89PNG"):
             print("⚠️ 캡처 실패: PNG 헤더 아님")
             return ""
 
-        with open(path, "wb") as f:
-            f.write(png_bytes)
-
-        print("📸 캡처 저장:", path)
-        return path
+        print("📸 캡처 저장:", local_path)
+        return local_path
 
     except Exception as e:
         print("⚠️ 캡처 실패:", e)
@@ -1708,7 +1763,7 @@ def process_one_job(d, job: dict):
         db_mark_job_replied(message_ts)
 
     db_update_job_status(message_ts, "완료", "")
-    notify_success(f"물마크 {watermark8} / 물마크 사용가능")
+    notify_success(f"물마크 {watermark8} / 💠물마크 사용가능💠")
     _final_reset()
     return True
 
@@ -1776,18 +1831,20 @@ def start_log_window_thread():
 
             for row in rows:
                 iid = str(row.get("message_ts") or row.get("id") or "")
-                requester = str(row.get("slack_user_id") or "").strip()
-                if requester:
-                    requester = f"<@{requester}>"
+                requester = str(row.get("slack_user_name") or "").strip()
+                if not requester:
+                    requester = str(row.get("slack_user_id") or "").strip()
+                    if requester:
+                        requester = f"<@{requester}>"
 
                 values = (
                     requester,
-                    job_processed_text(row.get("status") or ""),
-                    job_duplicate_text(row.get("status") or ""),
+                    "Y" if str(row.get("status") or "").strip() in ["완료", "중복팝업", "오류"] else "N",
+                    "Y" if str(row.get("status") or "").strip() == "중복팝업" else "N",
                     row.get("watermark8") or "",
                     fmt_ts(row.get("created_at")),
                     fmt_ts(row.get("replied_at")),
-                    "완료" if int(row.get("reply_done") or 0) == 1 else "미완료",
+                    "Y" if int(row.get("reply_done") or 0) == 1 else "N",
                     row.get("status") or "",
                     row.get("last_error") or "",
                 )

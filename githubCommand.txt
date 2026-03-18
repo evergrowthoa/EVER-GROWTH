@@ -22,6 +22,8 @@
 CPU 6zhdj RAM 12GB
 
 //////슬랙
+.\local_secrets.cmd << 이거 터미널 실행
+
 ==============================================
 python COWAY_OCR.py
 
