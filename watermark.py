@@ -8,8 +8,6 @@ import threading
 import traceback
 import urllib.request
 import urllib.error
-import subprocess
-import shutil
 import tkinter as tk
 from tkinter import ttk
 
@@ -18,7 +16,7 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 
-BUILD_ID = "DIGITAL_SALES_SLACK_WATERMARK_2026-03-18_003"
+BUILD_ID = "DIGITAL_SALES_SLACK_WATERMARK_2026-03-18_004"
 print("✅ BUILD:", BUILD_ID)
 
 # =========================
@@ -459,39 +457,8 @@ def slack_reply_in_thread(channel_id: str, thread_ts: str, text: str):
         return False
 
 
-def slack_upload_file_and_reply(channel_id: str, thread_ts: str, text: str, file_path: str):
-    if not slack_client:
-        print("⚠️ Slack 토큰 미설정 → 파일 업로드 생략:", text)
-        return False
-
-    try:
-        if file_path and os.path.isfile(file_path):
-            slack_client.files_upload_v2(
-                channel=channel_id,
-                thread_ts=thread_ts,
-                initial_comment=text,
-                file=file_path,
-                title=os.path.basename(file_path),
-            )
-        else:
-            slack_client.chat_postMessage(
-                channel=channel_id,
-                thread_ts=thread_ts,
-                text=text,
-            )
-        return True
-    except SlackApiError as e:
-        print("⚠️ Slack 파일 업로드/답장 실패:", e)
-        try:
-            slack_client.chat_postMessage(
-                channel=channel_id,
-                thread_ts=thread_ts,
-                text=text,
-            )
-            return True
-        except Exception as e2:
-            print("⚠️ Slack fallback 텍스트 답장도 실패:", e2)
-            return False
+def slack_send_result_text(channel_id: str, thread_ts: str, text: str):
+    return slack_reply_in_thread(channel_id, thread_ts, text)
 
 
 def slack_poll_loop():
@@ -545,8 +512,7 @@ def slack_poll_loop():
                     slack_reply_in_thread(
                         channel_id=SLACK_CHANNEL_ID,
                         thread_ts=thread_ts,
-                        text="조회요청 양식확인부탁드립니다." \
-                        "[물마크12345678] 또는 [물마크 12345678]",
+                        text="조회요청 양식확인부탁드립니다. [물마크12345678] 또는 [물마크 12345678]",
                     )
                     continue
 
@@ -1084,8 +1050,8 @@ def get_status_badges_in_results(d, target_status: str):
 def open_detail_by_status_badge(d, badge_obj) -> bool:
     try:
         left, top, right, bottom = badge_obj.get("bounds", (0, 0, 0, 0))
-        cx = (int(left) + int(right)) // 2
-        cy = (int(top) + int(bottom)) // 2
+        cx = (left + right) // 2
+        cy = (top + bottom) // 2
         d.click(cx, cy)
         time.sleep(0.8)
         return True
@@ -1171,149 +1137,6 @@ def open_install_env_info(d) -> bool:
             pass
 
     return False
-
-
-def screenshots_dir():
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    path = os.path.join(base_dir, "screenshots")
-    os.makedirs(path, exist_ok=True)
-    return path
-
-
-def _resolve_adb_executable() -> str:
-    candidates = []
-
-    for env_key in ["ADB_EXE", "ADB_PATH"]:
-        v = str(os.environ.get(env_key) or "").strip().strip('"')
-        if v:
-            candidates.append(v)
-
-    for cmd in ["adb", "adb.exe"]:
-        found = shutil.which(cmd)
-        if found:
-            candidates.append(found)
-
-    sdk_roots = [
-        str(os.environ.get("ANDROID_SDK_ROOT") or "").strip(),
-        str(os.environ.get("ANDROID_HOME") or "").strip(),
-        os.path.join(str(os.environ.get("LOCALAPPDATA") or "").strip(), "Android", "Sdk"),
-        os.path.join(os.path.expanduser("~"), "AppData", "Local", "Android", "Sdk"),
-    ]
-
-    for root in sdk_roots:
-        if not root:
-            continue
-        candidates.append(os.path.join(root, "platform-tools", "adb.exe"))
-        candidates.append(os.path.join(root, "platform-tools", "adb"))
-
-    seen = set()
-    for c in candidates:
-        cc = str(c or "").strip().strip('"')
-        if not cc:
-            continue
-        cc = os.path.normpath(cc)
-        if cc in seen:
-            continue
-        seen.add(cc)
-        if os.path.isfile(cc):
-            return cc
-
-    return ""
-
-
-def save_device_screenshot(d, prefix: str, watermark8: str) -> str:
-    stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
-    filename = f"{prefix}_{watermark8}_{stamp}.png"
-    local_path = os.path.join(screenshots_dir(), filename)
-    remote_path = f"/sdcard/{filename}"
-
-    def _is_valid_png(path: str) -> bool:
-        try:
-            if not os.path.isfile(path):
-                return False
-            if os.path.getsize(path) < 1024:
-                return False
-            with open(path, "rb") as f:
-                header = f.read(8)
-            return header.startswith(b"\x89PNG")
-        except Exception:
-            return False
-
-    def _cleanup_local():
-        try:
-            if os.path.isfile(local_path):
-                os.remove(local_path)
-        except Exception:
-            pass
-
-    adb_exe = _resolve_adb_executable()
-    if not adb_exe:
-        print("⚠️ 캡처 최종 실패: adb.exe 경로를 찾지 못함")
-        return ""
-
-    for attempt in range(1, 4):
-        try:
-            _cleanup_local()
-
-            try:
-                subprocess.run(
-                    [adb_exe, "-s", ADB_SERIAL, "shell", "rm", "-f", remote_path],
-                    capture_output=True,
-                    timeout=10,
-                )
-            except Exception:
-                pass
-
-            print(f"📸 캡처 시도 {attempt}/3 - adb shell screencap 저장")
-            shot = subprocess.run(
-                [adb_exe, "-s", ADB_SERIAL, "shell", "screencap", "-p", remote_path],
-                capture_output=True,
-                timeout=15,
-            )
-
-            if shot.returncode != 0:
-                err = (shot.stderr or b"").decode("utf-8", errors="ignore").strip()
-                print(f"⚠️ 캡처 {attempt}차 실패: screencap 저장 실패 / {err}")
-                time.sleep(0.8)
-                continue
-
-            time.sleep(1.2)
-
-            print(f"📸 캡처 시도 {attempt}/3 - adb pull")
-            pull = subprocess.run(
-                [adb_exe, "-s", ADB_SERIAL, "pull", remote_path, local_path],
-                capture_output=True,
-                timeout=20,
-            )
-
-            try:
-                subprocess.run(
-                    [adb_exe, "-s", ADB_SERIAL, "shell", "rm", "-f", remote_path],
-                    capture_output=True,
-                    timeout=10,
-                )
-            except Exception:
-                pass
-
-            if pull.returncode != 0:
-                err = (pull.stderr or b"").decode("utf-8", errors="ignore").strip()
-                print(f"⚠️ 캡처 {attempt}차 실패: pull 실패 / {err}")
-                time.sleep(0.8)
-                continue
-
-            if _is_valid_png(local_path):
-                print("📸 캡처 저장:", local_path)
-                return local_path
-
-            print(f"⚠️ 캡처 {attempt}차 실패: PNG 유효성 불일치 또는 파일 너무 작음")
-            time.sleep(0.8)
-
-        except Exception as e:
-            print(f"⚠️ 캡처 {attempt}차 예외:", e)
-            time.sleep(0.8)
-
-    print("⚠️ 캡처 최종 실패 - 이번 작업은 이미지 없이 진행")
-    return ""
 
 
 def wait_install_env_ready(d, timeout_sec: float = 8.0) -> bool:
@@ -1762,8 +1585,6 @@ def process_one_job(d, job: dict):
             time.sleep(1.0)
             continue
 
-        capture_path = save_device_screenshot(d, "watermark_filled", watermark8)
-
         if not click_input_complete(d):
             last_reason = "입력완료 클릭 실패"
             time.sleep(1.0)
@@ -1777,11 +1598,10 @@ def process_one_job(d, job: dict):
             if mention:
                 reply_text += f"\n{mention}"
 
-            ok_sent = slack_upload_file_and_reply(
+            ok_sent = slack_send_result_text(
                 channel_id=channel_id,
                 thread_ts=thread_ts,
                 text=reply_text,
-                file_path=capture_path,
             )
             if ok_sent:
                 db_mark_job_replied(message_ts)
@@ -1796,11 +1616,10 @@ def process_one_job(d, job: dict):
         if mention:
             reply_text += f"\n{mention}"
 
-        ok_sent = slack_upload_file_and_reply(
+        ok_sent = slack_send_result_text(
             channel_id=channel_id,
             thread_ts=thread_ts,
             text=reply_text,
-            file_path=capture_path,
         )
         if ok_sent:
             db_mark_job_replied(message_ts)
@@ -1986,6 +1805,7 @@ def start_log_window_thread():
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
+
 
 # =========================
 # 워커
