@@ -8,6 +8,10 @@ import threading
 import traceback
 import urllib.request
 import urllib.error
+import subprocess
+import shutil
+import tkinter as tk
+from tkinter import ttk
 
 import uiautomator2 as u2
 from slack_sdk import WebClient
@@ -172,6 +176,8 @@ def init_db():
                     watermark8 TEXT DEFAULT '',
                     status TEXT DEFAULT '',
                     last_error TEXT DEFAULT '',
+                    replied_at REAL DEFAULT 0,
+                    reply_done INTEGER DEFAULT 0,
                     created_at REAL DEFAULT 0,
                     updated_at REAL DEFAULT 0
                 )
@@ -190,6 +196,8 @@ def init_db():
 
             alter_columns = [
                 ("slack_user_id", "TEXT DEFAULT ''"),
+                ("replied_at", "REAL DEFAULT 0"),
+                ("reply_done", "INTEGER DEFAULT 0"),
             ]
 
             for col_name, col_def in alter_columns:
@@ -201,6 +209,161 @@ def init_db():
             conn.commit()
         finally:
             conn.close()
+
+
+def db_has_seen_message(message_ts: str) -> bool:
+    with db_lock:
+        conn = _db_conn()
+        try:
+            cur = conn.execute("SELECT 1 FROM slack_seen WHERE message_ts = ?", (message_ts,))
+            return cur.fetchone() is not None
+        finally:
+            conn.close()
+
+
+def db_mark_seen_message(message_ts: str, raw_text: str, watermark8: str):
+    now = time.time()
+    with db_lock:
+        conn = _db_conn()
+        try:
+            conn.execute("""
+                INSERT OR IGNORE INTO slack_seen (message_ts, raw_text, matched_watermark8, created_at)
+                VALUES (?, ?, ?, ?)
+            """, (
+                str(message_ts or "").strip(),
+                str(raw_text or "").strip(),
+                str(watermark8 or "").strip(),
+                now,
+            ))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def db_create_job(message_ts: str, channel_id: str, thread_ts: str, slack_user_id: str, watermark8: str):
+    now = time.time()
+    with db_lock:
+        conn = _db_conn()
+        try:
+            conn.execute("""
+                INSERT OR IGNORE INTO jobs (
+                    message_ts, channel_id, thread_ts, slack_user_id, watermark8,
+                    status, last_error, replied_at, reply_done, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                str(message_ts or "").strip(),
+                str(channel_id or "").strip(),
+                str(thread_ts or "").strip(),
+                str(slack_user_id or "").strip(),
+                str(watermark8 or "").strip(),
+                "대기",
+                "",
+                0,
+                0,
+                now,
+                now,
+            ))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def db_get_job_by_message_ts(message_ts: str):
+    with db_lock:
+        conn = _db_conn()
+        try:
+            cur = conn.execute("SELECT * FROM jobs WHERE message_ts = ?", (str(message_ts or "").strip(),))
+            row = cur.fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+
+def db_update_job_status(message_ts: str, status: str, last_error: str = ""):
+    with db_lock:
+        conn = _db_conn()
+        try:
+            conn.execute("""
+                UPDATE jobs
+                SET status = ?, last_error = ?, updated_at = ?
+                WHERE message_ts = ?
+            """, (
+                str(status or "").strip(),
+                str(last_error or "").strip(),
+                time.time(),
+                str(message_ts or "").strip(),
+            ))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def db_mark_job_replied(message_ts: str):
+    with db_lock:
+        conn = _db_conn()
+        try:
+            conn.execute("""
+                UPDATE jobs
+                SET replied_at = ?, reply_done = 1, updated_at = ?
+                WHERE message_ts = ?
+            """, (
+                time.time(),
+                time.time(),
+                str(message_ts or "").strip(),
+            ))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def db_list_waiting_jobs():
+    with db_lock:
+        conn = _db_conn()
+        try:
+            cur = conn.execute("""
+                SELECT *
+                FROM jobs
+                WHERE status IN ('대기')
+                ORDER BY created_at ASC, id ASC
+            """)
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
+def db_list_recent_jobs(limit: int = 300):
+    with db_lock:
+        conn = _db_conn()
+        try:
+            cur = conn.execute("""
+                SELECT *
+                FROM jobs
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+            """, (int(limit),))
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
+def fmt_ts(ts_value):
+    try:
+        ts = float(ts_value or 0)
+        if ts <= 0:
+            return ""
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+    except Exception:
+        return ""
+
+
+def job_processed_text(status_value: str) -> str:
+    s = str(status_value or "").strip()
+    return "완료" if s in ["완료", "중복팝업", "오류"] else "진행중"
+
+
+def job_duplicate_text(status_value: str) -> str:
+    s = str(status_value or "").strip()
+    return "중복" if s == "중복팝업" else "아님"
 
 
 def db_has_seen_message(message_ts: str) -> bool:
@@ -316,7 +479,7 @@ def extract_watermark8(text: str) -> str:
 def slack_reply_in_thread(channel_id: str, thread_ts: str, text: str):
     if not slack_client:
         print("⚠️ Slack 토큰 미설정 → Slack 답장 생략:", text)
-        return
+        return False
 
     try:
         slack_client.chat_postMessage(
@@ -324,8 +487,10 @@ def slack_reply_in_thread(channel_id: str, thread_ts: str, text: str):
             thread_ts=thread_ts,
             text=text,
         )
+        return True
     except SlackApiError as e:
         print("⚠️ Slack 답장 실패:", e)
+        return False
 
 
 def slack_poll_loop():
@@ -1001,15 +1166,80 @@ def screenshots_dir():
     return path
 
 
+def _resolve_adb_executable() -> str:
+    candidates = []
+
+    for env_key in ["ADB_EXE", "ADB_PATH"]:
+        v = str(os.environ.get(env_key) or "").strip().strip('"')
+        if v:
+            candidates.append(v)
+
+    for cmd in ["adb", "adb.exe"]:
+        found = shutil.which(cmd)
+        if found:
+            candidates.append(found)
+
+    sdk_roots = [
+        str(os.environ.get("ANDROID_SDK_ROOT") or "").strip(),
+        str(os.environ.get("ANDROID_HOME") or "").strip(),
+        os.path.join(str(os.environ.get("LOCALAPPDATA") or "").strip(), "Android", "Sdk"),
+        os.path.join(os.path.expanduser("~"), "AppData", "Local", "Android", "Sdk"),
+    ]
+
+    for root in sdk_roots:
+        if not root:
+            continue
+        candidates.append(os.path.join(root, "platform-tools", "adb.exe"))
+        candidates.append(os.path.join(root, "platform-tools", "adb"))
+
+    seen = set()
+    for c in candidates:
+        cc = str(c or "").strip().strip('"')
+        if not cc:
+            continue
+        cc = os.path.normpath(cc)
+        if cc in seen:
+            continue
+        seen.add(cc)
+        if os.path.isfile(cc):
+            return cc
+
+    return ""
+
+
 def save_device_screenshot(d, prefix: str, watermark8: str) -> str:
     stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
     filename = f"{prefix}_{watermark8}_{stamp}.png"
     path = os.path.join(screenshots_dir(), filename)
 
+    adb_exe = _resolve_adb_executable()
+    if not adb_exe:
+        print("⚠️ 캡처 실패: adb.exe 경로를 찾지 못함")
+        return ""
+
     try:
-        d.screenshot(path)
+        result = subprocess.run(
+            [adb_exe, "-s", ADB_SERIAL, "exec-out", "screencap", "-p"],
+            capture_output=True,
+            timeout=15,
+        )
+
+        if result.returncode != 0:
+            err = (result.stderr or b"").decode("utf-8", errors="ignore").strip()
+            print("⚠️ 캡처 실패: adb screencap 비정상 종료", err)
+            return ""
+
+        png_bytes = result.stdout or b""
+        if not png_bytes.startswith(b"\x89PNG"):
+            print("⚠️ 캡처 실패: PNG 헤더 아님")
+            return ""
+
+        with open(path, "wb") as f:
+            f.write(png_bytes)
+
         print("📸 캡처 저장:", path)
         return path
+
     except Exception as e:
         print("⚠️ 캡처 실패:", e)
         return ""
@@ -1332,11 +1562,14 @@ def process_one_job(d, job: dict):
         if mention:
             reply_text += f"\n{mention}"
 
-        slack_reply_in_thread(
+        ok_sent = slack_reply_in_thread(
             channel_id=channel_id,
             thread_ts=thread_ts,
             text=reply_text,
         )
+        if ok_sent:
+            db_mark_job_replied(message_ts)
+
         notify_error(f"조회 실패 / 물마크 {watermark8} / {reason}")
         _final_reset()
         return False
@@ -1441,39 +1674,140 @@ def process_one_job(d, job: dict):
     time.sleep(1.5)
 
     if is_duplicate_watermark_popup_open(d):
-        reply_text = "물마크 중복입니다"
+        reply_text = "🚨물마크 중복입니다🚨"
         mention = _mention_text()
         if mention:
             reply_text += f"\n{mention}"
 
-        slack_upload_file_and_reply(
+        ok_sent = slack_upload_file_and_reply(
             channel_id=channel_id,
             thread_ts=thread_ts,
             text=reply_text,
             file_path=capture_path,
         )
+        if ok_sent:
+            db_mark_job_replied(message_ts)
 
-        db_update_job_status(message_ts, "중복팝업", "물마크 중복 팝업 감지")
-        notify_progress(f"물마크 중복 팝업 감지 / 물마크 {watermark8}")
+        db_update_job_status(message_ts, "중복팝업", "🚨물마크 중복 팝업🚨")
+        notify_progress(f"🚨물마크 중복 팝업🚨 / 물마크 {watermark8}")
         _final_reset()
         return True
 
-    reply_text = "물마크 사용가능합니다"
+    reply_text = "💠물마크 사용가능💠"
     mention = _mention_text()
     if mention:
         reply_text += f"\n{mention}"
 
-    slack_upload_file_and_reply(
+    ok_sent = slack_upload_file_and_reply(
         channel_id=channel_id,
         thread_ts=thread_ts,
         text=reply_text,
         file_path=capture_path,
     )
+    if ok_sent:
+        db_mark_job_replied(message_ts)
 
     db_update_job_status(message_ts, "완료", "")
-    notify_success(f"조회 완료 / 물마크 {watermark8} / 물마크 사용가능")
+    notify_success(f"물마크 {watermark8} / 물마크 사용가능")
     _final_reset()
     return True
+
+
+# =========================
+# 로그 창
+# =========================
+def start_log_window_thread():
+    def _run():
+        root = tk.Tk()
+        root.title("디지털세일즈 물마크 진행현황")
+        root.geometry("1450x700")
+
+        top = ttk.Frame(root, padding=8)
+        top.pack(fill="both", expand=True)
+
+        cols = (
+            "requester",
+            "processed",
+            "duplicated",
+            "watermark8",
+            "asked_at",
+            "replied_at",
+            "reply_done",
+            "status",
+            "last_error",
+        )
+
+        tree = ttk.Treeview(top, columns=cols, show="headings", height=25)
+
+        tree.heading("requester", text="문의한사람")
+        tree.heading("processed", text="처리완료여부")
+        tree.heading("duplicated", text="중복여부")
+        tree.heading("watermark8", text="물마크번호")
+        tree.heading("asked_at", text="문의시각")
+        tree.heading("replied_at", text="답변시각")
+        tree.heading("reply_done", text="답변완료여부")
+        tree.heading("status", text="현재상태")
+        tree.heading("last_error", text="오류/비고")
+
+        tree.column("requester", width=180, anchor="center")
+        tree.column("processed", width=100, anchor="center")
+        tree.column("duplicated", width=80, anchor="center")
+        tree.column("watermark8", width=110, anchor="center")
+        tree.column("asked_at", width=150, anchor="center")
+        tree.column("replied_at", width=150, anchor="center")
+        tree.column("reply_done", width=100, anchor="center")
+        tree.column("status", width=100, anchor="center")
+        tree.column("last_error", width=420, anchor="w")
+
+        vsb = ttk.Scrollbar(top, orient="vertical", command=tree.yview)
+        hsb = ttk.Scrollbar(top, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
+        tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+
+        top.rowconfigure(0, weight=1)
+        top.columnconfigure(0, weight=1)
+
+        def _refresh():
+            rows = db_list_recent_jobs(limit=500)
+            existing_ids = set(tree.get_children())
+
+            for row in rows:
+                iid = str(row.get("message_ts") or row.get("id") or "")
+                requester = str(row.get("slack_user_id") or "").strip()
+                if requester:
+                    requester = f"<@{requester}>"
+
+                values = (
+                    requester,
+                    job_processed_text(row.get("status") or ""),
+                    job_duplicate_text(row.get("status") or ""),
+                    row.get("watermark8") or "",
+                    fmt_ts(row.get("created_at")),
+                    fmt_ts(row.get("replied_at")),
+                    "완료" if int(row.get("reply_done") or 0) == 1 else "미완료",
+                    row.get("status") or "",
+                    row.get("last_error") or "",
+                )
+
+                if iid in existing_ids:
+                    tree.item(iid, values=values)
+                    existing_ids.discard(iid)
+                else:
+                    tree.insert("", "end", iid=iid, values=values)
+
+            for iid in existing_ids:
+                tree.delete(iid)
+
+            root.after(1500, _refresh)
+
+        _refresh()
+        root.mainloop()
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
 
 
 # =========================
@@ -1540,6 +1874,7 @@ def main():
     init_db()
     preload_waiting_jobs()
     clear_stop()
+    start_log_window_thread()
 
     t_worker = threading.Thread(target=emulator_worker_loop, daemon=True)
     t_worker.start()
