@@ -9,3 +9,13 @@ __pycache__/
 build/
 dist/
 *.spec
+
+__pycache__/
+*.pyc
+*.pyo
+*.sqlite3
+.env
+.env.local
+local_secrets.cmd
+local_secrets.ps1
+screenshots/
