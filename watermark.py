@@ -1186,71 +1186,90 @@ def save_device_screenshot(d, prefix: str, watermark8: str) -> str:
     local_path = os.path.join(screenshots_dir(), filename)
     remote_path = f"/sdcard/{filename}"
 
-    try:
+    def _is_valid_png(path: str) -> bool:
         try:
-            d.shell(["rm", "-f", remote_path])
+            if not os.path.isfile(path):
+                return False
+            if os.path.getsize(path) <= 0:
+                return False
+            with open(path, "rb") as f:
+                header = f.read(8)
+            return header.startswith(b"\x89PNG")
         except Exception:
-            pass
+            return False
 
-        shot_ok = False
-
+    for attempt in range(1, 4):
         try:
-            d.shell(["screencap", "-p", remote_path])
-            shot_ok = True
-        except Exception as e:
-            print("⚠️ 캡처 1차 실패:", e)
+            try:
+                if os.path.isfile(local_path):
+                    os.remove(local_path)
+            except Exception:
+                pass
+
+            try:
+                d.shell(["rm", "-f", remote_path])
+            except Exception:
+                pass
+
             shot_ok = False
 
-        if not shot_ok:
             try:
-                d.shell(["sh", "-c", f"screencap -p {remote_path}"])
+                d.shell(["screencap", "-p", remote_path])
                 shot_ok = True
             except Exception as e:
-                print("⚠️ 캡처 2차 실패:", e)
+                print(f"⚠️ 캡처 {attempt}차 screencap 1단계 실패:", e)
                 shot_ok = False
 
-        if not shot_ok:
-            print("⚠️ 캡처 실패: 기기 내부 screencap 실행 실패")
-            return ""
+            if not shot_ok:
+                try:
+                    d.shell(["sh", "-c", f"screencap -p {remote_path}"])
+                    shot_ok = True
+                except Exception as e:
+                    print(f"⚠️ 캡처 {attempt}차 screencap 2단계 실패:", e)
+                    shot_ok = False
 
-        pulled = False
+            if not shot_ok:
+                time.sleep(0.6)
+                continue
 
-        try:
-            d.pull(remote_path, local_path)
-            pulled = True
-        except Exception as e:
-            print("⚠️ 캡처 pull 실패:", e)
+            time.sleep(0.8)
+
             pulled = False
+            try:
+                d.pull(remote_path, local_path)
+                pulled = True
+            except Exception as e:
+                print(f"⚠️ 캡처 {attempt}차 pull 실패:", e)
+                pulled = False
 
-        try:
-            d.shell(["rm", "-f", remote_path])
-        except Exception:
-            pass
+            try:
+                d.shell(["rm", "-f", remote_path])
+            except Exception:
+                pass
 
-        if not pulled:
-            return ""
+            if pulled and _is_valid_png(local_path):
+                print("📸 캡처 저장:", local_path)
+                return local_path
 
-        if not os.path.isfile(local_path):
-            print("⚠️ 캡처 실패: 로컬 파일 없음")
-            return ""
+            print(f"⚠️ 캡처 {attempt}차 실패: 로컬 PNG 유효성 불일치")
+            time.sleep(0.6)
 
-        if os.path.getsize(local_path) <= 0:
-            print("⚠️ 캡처 실패: 로컬 파일 크기 0")
-            return ""
+        except Exception as e:
+            print(f"⚠️ 캡처 {attempt}차 전체 예외:", e)
+            time.sleep(0.6)
 
-        with open(local_path, "rb") as f:
-            header = f.read(8)
-
-        if not header.startswith(b"\x89PNG"):
-            print("⚠️ 캡처 실패: PNG 헤더 아님")
-            return ""
-
-        print("📸 캡처 저장:", local_path)
-        return local_path
-
+    try:
+        img = d.screenshot()
+        if img is not None:
+            img.save(local_path)
+            if _is_valid_png(local_path):
+                print("📸 캡처 저장(폴백):", local_path)
+                return local_path
     except Exception as e:
-        print("⚠️ 캡처 실패:", e)
-        return ""
+        print("⚠️ 캡처 폴백 실패:", e)
+
+    print("⚠️ 캡처 최종 실패")
+    return ""
 
 
 def wait_install_env_ready(d, timeout_sec: float = 8.0) -> bool:
@@ -1540,7 +1559,7 @@ def process_one_job(d, job: dict):
         except Exception as e:
             print("⚠️ 작업 종료 후 디지털세일즈 리셋 예외:", e)
 
-    def _fail(reason: str):
+    def _send_final_error(reason: str):
         db_update_job_status(message_ts, "오류", reason)
         reply_text = f"조회번호 {watermark8} / 오류\n{reason}"
         mention = _mention_text()
@@ -1562,104 +1581,170 @@ def process_one_job(d, job: dict):
     print(f"🚀 작업 시작: 물마크={watermark8}")
     db_update_job_status(message_ts, "처리중", "")
 
-    if not restart_digital_sales_app(d):
-        return _fail("디지털세일즈 앱 재시작 실패")
+    last_reason = ""
 
-    if not ensure_mobile_order_home(d):
-        return _fail("모바일 주문 홈 진입 실패")
+    for attempt in range(1, 4):
+        print(f"🔄 작업 재시도 {attempt}/3 / 물마크={watermark8}")
 
-    if is_unexpected_digital_sales_home(d):
-        if not recover_from_unexpected_home(d, f"작업시작 직전 / 물마크 {watermark8}"):
-            return _fail("예상 밖 홈화면 복구 실패")
-
-    if not enter_order_status(d):
-        return _fail("주문현황 진입 실패")
-
-    ready_state = wait_until_order_status_ready(d, timeout_sec=8.0)
-    if ready_state == "home":
-        return _fail("주문현황 로딩 중 홈화면 이탈")
-    if ready_state != "ready":
-        return _fail("주문현황 준비 실패")
-
-    if not ensure_general_tab(d, force_click=True):
-        return _fail("일반 탭 복구 실패")
-
-    edit = find_search_edittext(d)
-    if edit is None:
-        return _fail("검색 입력칸 찾기 실패")
-
-    print(f"🔎 고객 검색: {SEARCH_NAME}")
-    if not type_into_edittext(d, edit, SEARCH_NAME):
-        return _fail(f"검색어 입력 실패: {SEARCH_NAME}")
-
-    trigger_search(d, edit)
-    time.sleep(1.3)
-
-    if is_unexpected_digital_sales_home(d):
-        return _fail("검색 후 홈화면 이탈")
-
-    badges = get_status_badges_in_results(d, TARGET_STATUS_TEXT)
-    if not badges:
-        return _fail(f"{TARGET_STATUS_TEXT} 상태 배지 미검출")
-
-    matched = False
-    for idx, badge in enumerate(badges, start=1):
-        print(f"✅ 상태 후보 확인 {idx}/{len(badges)}")
-
-        if not open_detail_by_status_badge(d, badge):
+        if not restart_digital_sales_app(d):
+            last_reason = "디지털세일즈 앱 재시작 실패"
+            time.sleep(1.0)
             continue
 
-        time.sleep(0.8)
+        if not ensure_mobile_order_home(d):
+            last_reason = "모바일 주문 홈 진입 실패"
+            time.sleep(1.0)
+            continue
 
-        if match_detail_by_name_phone(d, DETAIL_EXPECT_NAME, DETAIL_EXPECT_PHONE11):
-            matched = True
-            print("✅ 상세 이름/번호 일치")
-            break
+        if is_unexpected_digital_sales_home(d):
+            if not recover_from_unexpected_home(d, f"작업시작 직전 / 물마크 {watermark8}"):
+                last_reason = "예상 밖 홈화면 복구 실패"
+                time.sleep(1.0)
+                continue
+
+        if not enter_order_status(d):
+            last_reason = "주문현황 진입 실패"
+            time.sleep(1.0)
+            continue
+
+        ready_state = wait_until_order_status_ready(d, timeout_sec=12.0)
+        if ready_state == "home":
+            last_reason = "주문현황 로딩 중 홈화면 이탈"
+            time.sleep(1.0)
+            continue
+        if ready_state != "ready":
+            last_reason = "주문현황 준비 실패"
+            time.sleep(1.0)
+            continue
+
+        if not ensure_general_tab(d, force_click=True):
+            last_reason = "일반 탭 복구 실패"
+            time.sleep(1.0)
+            continue
+
+        edit = find_search_edittext(d)
+        if edit is None:
+            last_reason = "검색 입력칸 찾기 실패"
+            time.sleep(1.0)
+            continue
+
+        print(f"🔎 고객 검색: {SEARCH_NAME}")
+        if not type_into_edittext(d, edit, SEARCH_NAME):
+            last_reason = f"검색어 입력 실패: {SEARCH_NAME}"
+            time.sleep(1.0)
+            continue
+
+        trigger_search(d, edit)
+        time.sleep(1.8)
+
+        if is_unexpected_digital_sales_home(d):
+            last_reason = "검색 후 홈화면 이탈"
+            time.sleep(1.0)
+            continue
+
+        badges = get_status_badges_in_results(d, TARGET_STATUS_TEXT)
+        if not badges:
+            last_reason = f"{TARGET_STATUS_TEXT} 상태 배지 미검출"
+            time.sleep(1.0)
+            continue
+
+        matched = False
+        for idx, badge in enumerate(badges, start=1):
+            print(f"✅ 상태 후보 확인 {idx}/{len(badges)}")
+
+            if not open_detail_by_status_badge(d, badge):
+                continue
+
+            time.sleep(1.0)
+
+            if match_detail_by_name_phone(d, DETAIL_EXPECT_NAME, DETAIL_EXPECT_PHONE11):
+                matched = True
+                print("✅ 상세 이름/번호 일치")
+                break
+
+            try:
+                d.press("back")
+                time.sleep(0.8)
+            except Exception:
+                pass
+
+        if not matched:
+            last_reason = "설치입력 상세에서 이름/번호 일치 항목을 찾지 못함"
+            time.sleep(1.0)
+            continue
 
         try:
-            d.press("back")
-            time.sleep(0.8)
+            if not d(text="주문 이어서 하기").exists:
+                last_reason = "주문 이어서 하기 버튼 미검출"
+                time.sleep(1.0)
+                continue
         except Exception:
-            pass
+            last_reason = "주문 이어서 하기 버튼 확인 실패"
+            time.sleep(1.0)
+            continue
 
-    if not matched:
-        return _fail("설치입력 상세에서 이름/번호 일치 항목을 찾지 못함")
+        if not click_text_center(d, "주문 이어서 하기", 0.20, 0.85):
+            last_reason = "주문 이어서 하기 클릭 실패"
+            time.sleep(1.0)
+            continue
 
-    try:
-        if not d(text="주문 이어서 하기").exists:
-            return _fail("주문 이어서 하기 버튼 미검출")
-    except Exception:
-        return _fail("주문 이어서 하기 버튼 확인 실패")
+        time.sleep(2.0)
 
-    if not click_text_center(d, "주문 이어서 하기", 0.20, 0.85):
-        return _fail("주문 이어서 하기 클릭 실패")
+        if is_unexpected_digital_sales_home(d):
+            last_reason = "주문 이어서 하기 후 홈화면 이탈"
+            time.sleep(1.0)
+            continue
 
-    time.sleep(2.0)
+        if not wait_install_info_ready(d, timeout_sec=12.0):
+            last_reason = "설치정보 화면 진입 실패"
+            time.sleep(1.0)
+            continue
 
-    if is_unexpected_digital_sales_home(d):
-        return _fail("주문 이어서 하기 후 홈화면 이탈")
+        if not open_install_env_info(d):
+            last_reason = "설치환경정보 클릭 실패"
+            time.sleep(1.0)
+            continue
 
-    if not wait_install_info_ready(d, timeout_sec=12.0):
-        return _fail("설치정보 화면 진입 실패")
+        if not wait_install_env_ready(d, timeout_sec=8.0):
+            last_reason = "설치환경정보 화면 준비 실패"
+            time.sleep(1.0)
+            continue
 
-    if not open_install_env_info(d):
-        return _fail("설치환경정보 클릭 실패")
+        if not choose_install_env_values(d, watermark8):
+            last_reason = "설치환경정보 값 선택/입력 실패"
+            time.sleep(1.0)
+            continue
 
-    if not wait_install_env_ready(d, timeout_sec=8.0):
-        return _fail("설치환경정보 화면 준비 실패")
+        capture_path = save_device_screenshot(d, "watermark_filled", watermark8)
 
-    if not choose_install_env_values(d, watermark8):
-        return _fail("설치환경정보 값 선택/입력 실패")
+        if not click_input_complete(d):
+            last_reason = "입력완료 클릭 실패"
+            time.sleep(1.0)
+            continue
 
-    capture_path = save_device_screenshot(d, "watermark_filled", watermark8)
+        time.sleep(1.5)
 
-    if not click_input_complete(d):
-        return _fail("입력완료 클릭 실패")
+        if is_duplicate_watermark_popup_open(d):
+            reply_text = "🚨물마크 중복입니다🚨"
+            mention = _mention_text()
+            if mention:
+                reply_text += f"\n{mention}"
 
-    time.sleep(1.5)
+            ok_sent = slack_upload_file_and_reply(
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                text=reply_text,
+                file_path=capture_path,
+            )
+            if ok_sent:
+                db_mark_job_replied(message_ts)
 
-    if is_duplicate_watermark_popup_open(d):
-        reply_text = "🚨물마크 중복입니다🚨"
+            db_update_job_status(message_ts, "중복팝업", "🚨물마크 중복 팝업🚨")
+            notify_progress(f"🚨물마크 중복 팝업🚨 / 물마크 {watermark8}")
+            _final_reset()
+            return True
+
+        reply_text = "💠물마크 사용가능💠"
         mention = _mention_text()
         if mention:
             reply_text += f"\n{mention}"
@@ -1673,29 +1758,12 @@ def process_one_job(d, job: dict):
         if ok_sent:
             db_mark_job_replied(message_ts)
 
-        db_update_job_status(message_ts, "중복팝업", "🚨물마크 중복 팝업🚨")
-        notify_progress(f"🚨물마크 중복 팝업🚨 / 물마크 {watermark8}")
+        db_update_job_status(message_ts, "완료", "")
+        notify_success(f"물마크 {watermark8} / 💠물마크 사용가능💠")
         _final_reset()
         return True
 
-    reply_text = "💠물마크 사용가능💠"
-    mention = _mention_text()
-    if mention:
-        reply_text += f"\n{mention}"
-
-    ok_sent = slack_upload_file_and_reply(
-        channel_id=channel_id,
-        thread_ts=thread_ts,
-        text=reply_text,
-        file_path=capture_path,
-    )
-    if ok_sent:
-        db_mark_job_replied(message_ts)
-
-    db_update_job_status(message_ts, "완료", "")
-    notify_success(f"물마크 {watermark8} / 💠물마크 사용가능💠")
-    _final_reset()
-    return True
+    return _send_final_error(last_reason or "재시도 후에도 처리 실패")
 
 
 # =========================
