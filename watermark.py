@@ -25,11 +25,11 @@ DIGITAL_SALES_APP_NAME = "디지털세일즈"
 DIGITAL_SALES_PACKAGE = ""
 
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "").strip()
-SLACK_CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID", "C0AM6V8LEF8").strip()
+SLACK_CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID", "").strip()
 
 ENABLE_TELEGRAM_NOTIFY = True
-TELEGRAM_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "8777418618:AAGNdHu1C6Lz5yQJn8Xq1hCxWhEUp8Ao4O8").strip()
-TELEGRAM_CHAT_ID_ME = os.environ.get("TG_CHAT_ID_ME", "8759444041").strip()
+TELEGRAM_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID_ME = os.environ.get("TG_CHAT_ID_ME", "").strip()
 
 NOTIFY_PREFIX = "[디지털세일즈 Slack 조회]"
 
@@ -168,6 +168,7 @@ def init_db():
                     message_ts TEXT UNIQUE,
                     channel_id TEXT DEFAULT '',
                     thread_ts TEXT DEFAULT '',
+                    slack_user_id TEXT DEFAULT '',
                     watermark8 TEXT DEFAULT '',
                     status TEXT DEFAULT '',
                     last_error TEXT DEFAULT '',
@@ -175,6 +176,25 @@ def init_db():
                     updated_at REAL DEFAULT 0
                 )
             """)
+
+            existing_cols = set()
+            cur = conn.execute("PRAGMA table_info(jobs)")
+            for row in cur.fetchall():
+                try:
+                    existing_cols.add(str(row["name"]))
+                except Exception:
+                    try:
+                        existing_cols.add(str(row[1]))
+                    except Exception:
+                        pass
+
+            alter_columns = [
+                ("slack_user_id", "TEXT DEFAULT ''"),
+            ]
+
+            for col_name, col_def in alter_columns:
+                if col_name not in existing_cols:
+                    conn.execute(f"ALTER TABLE jobs ADD COLUMN {col_name} {col_def}")
 
             conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_updated_at ON jobs(updated_at DESC)")
@@ -212,20 +232,21 @@ def db_mark_seen_message(message_ts: str, raw_text: str, watermark8: str):
             conn.close()
 
 
-def db_create_job(message_ts: str, channel_id: str, thread_ts: str, watermark8: str):
+def db_create_job(message_ts: str, channel_id: str, thread_ts: str, slack_user_id: str, watermark8: str):
     now = time.time()
     with db_lock:
         conn = _db_conn()
         try:
             conn.execute("""
                 INSERT OR IGNORE INTO jobs (
-                    message_ts, channel_id, thread_ts, watermark8,
+                    message_ts, channel_id, thread_ts, slack_user_id, watermark8,
                     status, last_error, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 str(message_ts or "").strip(),
                 str(channel_id or "").strip(),
                 str(thread_ts or "").strip(),
+                str(slack_user_id or "").strip(),
                 str(watermark8 or "").strip(),
                 "대기",
                 "",
@@ -235,7 +256,6 @@ def db_create_job(message_ts: str, channel_id: str, thread_ts: str, watermark8: 
             conn.commit()
         finally:
             conn.close()
-
 
 def db_get_job_by_message_ts(message_ts: str):
     with db_lock:
@@ -334,6 +354,7 @@ def slack_poll_loop():
                 raw_text = str(msg.get("text") or "").strip()
                 subtype = str(msg.get("subtype") or "").strip()
                 bot_id = str(msg.get("bot_id") or "").strip()
+                slack_user_id = str(msg.get("user") or "").strip()
                 thread_ts = str(msg.get("thread_ts") or "").strip() or message_ts
 
                 if not message_ts:
@@ -356,12 +377,13 @@ def slack_poll_loop():
                 if not watermark8:
                     continue
 
-                print(f"📥 Slack 조회요청 감지: ts={message_ts} / 물마크={watermark8}")
+                print(f"📥 Slack 조회요청 감지: ts={message_ts} / 물마크={watermark8} / user={slack_user_id}")
 
                 db_create_job(
                     message_ts=message_ts,
                     channel_id=SLACK_CHANNEL_ID,
                     thread_ts=thread_ts,
+                    slack_user_id=slack_user_id,
                     watermark8=watermark8,
                 )
 
@@ -518,6 +540,40 @@ def restart_digital_sales_app(d) -> bool:
             return True
 
         return False
+    except Exception:
+        return False
+
+
+def reset_digital_sales_to_idle(d) -> bool:
+    try:
+        if DIGITAL_SALES_PACKAGE:
+            try:
+                d.app_stop(DIGITAL_SALES_PACKAGE)
+                time.sleep(1.2)
+            except Exception:
+                pass
+
+            try:
+                d.app_start(DIGITAL_SALES_PACKAGE)
+                time.sleep(2.5)
+            except Exception:
+                return False
+        else:
+            try:
+                d.press("home")
+                time.sleep(0.8)
+            except Exception:
+                pass
+
+            if not d(text=DIGITAL_SALES_APP_NAME).exists:
+                return False
+
+            if not click_text_center(d, DIGITAL_SALES_APP_NAME):
+                return False
+
+            time.sleep(2.5)
+
+        return ensure_mobile_order_home(d)
     except Exception:
         return False
 
@@ -938,6 +994,301 @@ def open_install_env_info(d) -> bool:
     return False
 
 
+def screenshots_dir():
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(base_dir, "screenshots")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def save_device_screenshot(d, prefix: str, watermark8: str) -> str:
+    stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+    filename = f"{prefix}_{watermark8}_{stamp}.png"
+    path = os.path.join(screenshots_dir(), filename)
+
+    try:
+        d.screenshot(path)
+        print("📸 캡처 저장:", path)
+        return path
+    except Exception as e:
+        print("⚠️ 캡처 실패:", e)
+        return ""
+
+
+def slack_upload_file_and_reply(channel_id: str, thread_ts: str, text: str, file_path: str):
+    if not slack_client:
+        print("⚠️ Slack 토큰 미설정 → 파일 업로드 생략:", text)
+        return
+
+    try:
+        if file_path and os.path.isfile(file_path):
+            slack_client.files_upload_v2(
+                channel=channel_id,
+                thread_ts=thread_ts,
+                initial_comment=text,
+                file=file_path,
+                title=os.path.basename(file_path),
+            )
+        else:
+            slack_client.chat_postMessage(
+                channel=channel_id,
+                thread_ts=thread_ts,
+                text=text,
+            )
+    except SlackApiError as e:
+        print("⚠️ Slack 파일 업로드/답장 실패:", e)
+
+
+def wait_install_env_ready(d, timeout_sec: float = 8.0) -> bool:
+    end_at = time.time() + timeout_sec
+    stable_ok_count = 0
+
+    while time.time() < end_at:
+        try:
+            if is_unexpected_digital_sales_home(d):
+                return False
+
+            has_return = d(textContains="타사제품 반환여부").exists or d(text="미반환").exists or d(text="반환").exists
+            has_watermark = d(textContains="물마크 번호").exists
+            has_done = d(text="입력완료").exists or d(textContains="입력완료").exists
+
+            if has_return and has_watermark and has_done:
+                stable_ok_count += 1
+                if stable_ok_count >= 2:
+                    return True
+            else:
+                stable_ok_count = 0
+        except Exception:
+            stable_ok_count = 0
+
+        time.sleep(0.3)
+
+    return False
+
+
+def _read_edit_obj_text(obj) -> str:
+    try:
+        return (obj.get_text() or "").strip()
+    except Exception:
+        try:
+            info = obj.info or {}
+            return str(info.get("text") or "").strip()
+        except Exception:
+            return ""
+
+
+def _find_first_label_obj(d, label_candidates):
+    for lab in label_candidates:
+        try:
+            if d(text=lab).exists:
+                return d(text=lab)
+        except Exception:
+            pass
+
+    for lab in label_candidates:
+        try:
+            if d(textContains=lab).exists:
+                return d(textContains=lab)
+        except Exception:
+            pass
+
+    return None
+
+
+def _find_edittext_near_label(d, label_candidates, y_tolerance: int = 110, y_below: int = 220):
+    label_obj = _find_first_label_obj(d, label_candidates)
+
+    try:
+        edits = d(className="android.widget.EditText")
+        cnt = edits.count
+    except Exception:
+        cnt = 0
+
+    best = None
+    best_score = None
+
+    label_left = 0
+    label_right = 0
+    label_cy = 0
+    label_bottom = 0
+
+    if label_obj is not None:
+        try:
+            b = label_obj.info.get("bounds", {})
+            label_left = int(b.get("left", 0))
+            label_right = int(b.get("right", 0))
+            label_top = int(b.get("top", 0))
+            label_bottom = int(b.get("bottom", 0))
+            label_cy = (label_top + label_bottom) // 2
+        except Exception:
+            label_obj = None
+
+    for i in range(cnt):
+        try:
+            e = edits[i]
+            b = e.info.get("bounds", {})
+            left = int(b.get("left", 0))
+            top = int(b.get("top", 0))
+            right = int(b.get("right", 0))
+            bottom = int(b.get("bottom", 0))
+            cy = (top + bottom) // 2
+            bw = right - left
+
+            if bw < 160:
+                continue
+
+            score = None
+
+            if label_obj is not None:
+                if abs(cy - label_cy) <= y_tolerance and left >= max(0, label_left - 20):
+                    score = abs(cy - label_cy) + abs(left - label_right)
+                elif top >= label_bottom - 10 and top <= label_bottom + y_below:
+                    score = 1000 + abs(top - label_bottom)
+            else:
+                score = top
+
+            if score is not None and (best is None or score < best_score):
+                best = e
+                best_score = score
+        except Exception:
+            continue
+
+    return best
+
+
+def select_bottom_sheet_option(d, option_text: str, timeout_sec: float = 6.0) -> bool:
+    end_at = time.time() + timeout_sec
+
+    while time.time() < end_at:
+        try:
+            if d(text=option_text).exists:
+                d(text=option_text).click()
+                time.sleep(0.8)
+                return True
+        except Exception:
+            pass
+
+        try:
+            if d(textContains=option_text).exists:
+                d(textContains=option_text).click()
+                time.sleep(0.8)
+                return True
+        except Exception:
+            pass
+
+        time.sleep(0.2)
+
+    return False
+
+
+def fill_watermark_number(d, watermark8: str) -> bool:
+    edit = _find_edittext_near_label(d, ["물마크 번호", "물마크번호"], y_tolerance=100, y_below=200)
+    if edit is None:
+        return False
+
+    ok = type_into_edittext(d, edit, watermark8)
+    if not ok:
+        return False
+
+    time.sleep(0.6)
+
+    current_text = _read_edit_obj_text(edit)
+    current_digits = normalize_digits(current_text)
+    return current_digits == watermark8
+
+
+def click_text_if_exists(d, txt: str, y_min_ratio: float = 0.0, y_max_ratio: float = 1.0) -> bool:
+    try:
+        if d(text=txt).exists or d(textContains=txt).exists:
+            return click_text_center(d, txt, y_min_ratio, y_max_ratio)
+    except Exception:
+        pass
+    return False
+
+
+def choose_install_env_values(d, watermark8: str) -> bool:
+    if not wait_install_env_ready(d, timeout_sec=8.0):
+        return False
+
+    if not click_text_if_exists(d, "제조사 선택", 0.10, 0.45):
+        return False
+    if not select_bottom_sheet_option(d, "SK"):
+        return False
+
+    if not click_text_if_exists(d, "년도", 0.10, 0.45):
+        return False
+    if not select_bottom_sheet_option(d, "2025년"):
+        return False
+
+    if not click_text_if_exists(d, "월", 0.10, 0.45):
+        return False
+    if not select_bottom_sheet_option(d, "1월"):
+        return False
+
+    if not click_text_if_exists(d, "제품형태 선택", 0.10, 0.55):
+        return False
+    if not select_bottom_sheet_option(d, "데스크탑"):
+        return False
+
+    if not click_text_if_exists(d, "제품종류 선택", 0.10, 0.60):
+        return False
+    if not select_bottom_sheet_option(d, "얼음정수기"):
+        return False
+
+    if not click_text_if_exists(d, "설치형태 선택", 0.10, 0.70):
+        return False
+    if not select_bottom_sheet_option(d, "직수형"):
+        return False
+
+    if not fill_watermark_number(d, watermark8):
+        return False
+
+    if not click_text_if_exists(d, "다중시설 선택", 0.40, 0.80):
+        return False
+    if not select_bottom_sheet_option(d, "대상 아님"):
+        return False
+
+    return True
+
+
+def is_duplicate_watermark_popup_open(d) -> bool:
+    popup_fragments = [
+        "이미 접수 된 물마크 번호",
+        "이미 접수된 물마크 번호",
+        "본칙의심 모니터링 대상",
+        "해당 번호로 주문 진행 시",
+    ]
+
+    for frag in popup_fragments:
+        try:
+            if d(textContains=frag).exists:
+                return True
+        except Exception:
+            pass
+
+    return False
+
+
+def click_input_complete(d) -> bool:
+    try:
+        if d(text="입력완료").exists:
+            d(text="입력완료").click()
+            time.sleep(1.2)
+            return True
+    except Exception:
+        pass
+
+    try:
+        if d(textContains="입력완료").exists:
+            d(textContains="입력완료").click()
+            time.sleep(1.2)
+            return True
+    except Exception:
+        pass
+
+    return click_text_center(d, "입력완료", 0.85, 0.99)
+
+
 # =========================
 # 실제 조회 플로우
 # =========================
@@ -946,15 +1297,37 @@ def process_one_job(d, job: dict):
     message_ts = str(job.get("message_ts") or "").strip()
     channel_id = str(job.get("channel_id") or "").strip()
     thread_ts = str(job.get("thread_ts") or "").strip()
+    slack_user_id = str(job.get("slack_user_id") or "").strip()
+
+    def _mention_text():
+        if slack_user_id:
+            return f"<@{slack_user_id}>"
+        return ""
+
+    def _final_reset():
+        try:
+            ok = reset_digital_sales_to_idle(d)
+            if ok:
+                print("✅ 작업 종료 후 디지털세일즈 대기상태 복귀 완료")
+            else:
+                print("⚠️ 작업 종료 후 디지털세일즈 대기상태 복귀 실패")
+        except Exception as e:
+            print("⚠️ 작업 종료 후 디지털세일즈 리셋 예외:", e)
 
     def _fail(reason: str):
         db_update_job_status(message_ts, "오류", reason)
+        reply_text = f"조회번호 {watermark8} / 오류\n{reason}"
+        mention = _mention_text()
+        if mention:
+            reply_text += f"\n{mention}"
+
         slack_reply_in_thread(
             channel_id=channel_id,
             thread_ts=thread_ts,
-            text=f"조회번호 {watermark8} / 오류\n{reason}",
+            text=reply_text,
         )
         notify_error(f"조회 실패 / 물마크 {watermark8} / {reason}")
+        _final_reset()
         return False
 
     print(f"🚀 작업 시작: 물마크={watermark8}")
@@ -1043,13 +1416,52 @@ def process_one_job(d, job: dict):
     if not open_install_env_info(d):
         return _fail("설치환경정보 클릭 실패")
 
-    db_update_job_status(message_ts, "완료", "")
-    slack_reply_in_thread(
+    if not wait_install_env_ready(d, timeout_sec=8.0):
+        return _fail("설치환경정보 화면 준비 실패")
+
+    if not choose_install_env_values(d, watermark8):
+        return _fail("설치환경정보 값 선택/입력 실패")
+
+    capture_path = save_device_screenshot(d, "watermark_filled", watermark8)
+
+    if not click_input_complete(d):
+        return _fail("입력완료 클릭 실패")
+
+    time.sleep(1.5)
+
+    if is_duplicate_watermark_popup_open(d):
+        reply_text = "물마크 중복입니다"
+        mention = _mention_text()
+        if mention:
+            reply_text += f"\n{mention}"
+
+        slack_upload_file_and_reply(
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            text=reply_text,
+            file_path=capture_path,
+        )
+
+        db_update_job_status(message_ts, "중복팝업", "물마크 중복 팝업 감지")
+        notify_progress(f"물마크 중복 팝업 감지 / 물마크 {watermark8}")
+        _final_reset()
+        return True
+
+    reply_text = "물마크 사용가능합니다"
+    mention = _mention_text()
+    if mention:
+        reply_text += f"\n{mention}"
+
+    slack_upload_file_and_reply(
         channel_id=channel_id,
         thread_ts=thread_ts,
-        text=f"조회번호 {watermark8} / 설치환경정보 진입 완료",
+        text=reply_text,
+        file_path=capture_path,
     )
-    notify_success(f"조회 완료 / 물마크 {watermark8} / 설치환경정보 진입 완료")
+
+    db_update_job_status(message_ts, "완료", "")
+    notify_success(f"조회 완료 / 물마크 {watermark8} / 물마크 사용가능")
+    _final_reset()
     return True
 
 
