@@ -363,6 +363,30 @@ def db_list_recent_jobs(limit: int = 300):
             conn.close()
 
 
+def db_delete_jobs_by_message_ts_list(message_ts_list):
+    targets = []
+    for x in list(message_ts_list or []):
+        s = str(x or "").strip()
+        if s:
+            targets.append(s)
+
+    if not targets:
+        return 0
+
+    with db_lock:
+        conn = _db_conn()
+        try:
+            placeholders = ",".join(["?"] * len(targets))
+            cur = conn.execute(
+                f"DELETE FROM jobs WHERE message_ts IN ({placeholders})",
+                tuple(targets)
+            )
+            conn.commit()
+            return int(cur.rowcount or 0)
+        finally:
+            conn.close()
+
+
 def fmt_ts(ts_value):
     try:
         ts = float(ts_value or 0)
@@ -1681,12 +1705,43 @@ def start_log_window_thread():
     def _run():
         root = tk.Tk()
         root.title("디지털세일즈 물마크 진행현황")
-        root.geometry("1450x700")
+        root.geometry("1520x760")
 
-        top = ttk.Frame(root, padding=8)
-        top.pack(fill="both", expand=True)
+        checked_ids = set()
+
+        top_wrap = ttk.Frame(root, padding=8)
+        top_wrap.pack(fill="both", expand=True)
+
+        ctrl = ttk.Frame(top_wrap)
+        ctrl.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        top = ttk.Frame(top_wrap)
+        top.grid(row=1, column=0, sticky="nsew")
+
+        top_wrap.rowconfigure(1, weight=1)
+        top_wrap.columnconfigure(0, weight=1)
+
+        info_var = tk.StringVar(value="체크 후 [선택삭제]를 누르면 기록이 삭제됩니다.")
+
+        ttk.Label(ctrl, textvariable=info_var).pack(side="left", padx=(0, 10))
+
+        def _delete_checked():
+            targets = list(checked_ids)
+            if not targets:
+                info_var.set("삭제할 항목이 없습니다.")
+                return
+
+            deleted = db_delete_jobs_by_message_ts_list(targets)
+
+            for iid in list(targets):
+                checked_ids.discard(iid)
+
+            info_var.set(f"{deleted}건 삭제 완료")
+            _refresh_once()
+
+        ttk.Button(ctrl, text="선택삭제", command=_delete_checked).pack(side="right")
 
         cols = (
+            "delete_mark",
             "requester",
             "processed",
             "duplicated",
@@ -1700,6 +1755,7 @@ def start_log_window_thread():
 
         tree = ttk.Treeview(top, columns=cols, show="headings", height=25)
 
+        tree.heading("delete_mark", text="삭제")
         tree.heading("requester", text="요청자")
         tree.heading("processed", text="처리완료여부")
         tree.heading("duplicated", text="중복여부")
@@ -1710,6 +1766,7 @@ def start_log_window_thread():
         tree.heading("status", text="현재상태")
         tree.heading("last_error", text="오류/비고")
 
+        tree.column("delete_mark", width=60, anchor="center")
         tree.column("requester", width=180, anchor="center")
         tree.column("processed", width=100, anchor="center")
         tree.column("duplicated", width=80, anchor="center")
@@ -1731,12 +1788,46 @@ def start_log_window_thread():
         top.rowconfigure(0, weight=1)
         top.columnconfigure(0, weight=1)
 
-        def _refresh():
+        def _toggle_check(iid: str):
+            if not iid:
+                return
+
+            if iid in checked_ids:
+                checked_ids.discard(iid)
+            else:
+                checked_ids.add(iid)
+
+            _refresh_once()
+
+        def _on_tree_click(event):
+            region = tree.identify("region", event.x, event.y)
+            if region != "cell":
+                return
+
+            col = tree.identify_column(event.x)
+            row_id = tree.identify_row(event.y)
+
+            if not row_id:
+                return
+
+            if col == "#1":
+                _toggle_check(row_id)
+
+        tree.bind("<Button-1>", _on_tree_click)
+
+        def _refresh_once():
             rows = db_list_recent_jobs(limit=500)
             existing_ids = set(tree.get_children())
 
+            db_ids = set()
+
             for row in rows:
                 iid = str(row.get("message_ts") or row.get("id") or "")
+                if not iid:
+                    continue
+
+                db_ids.add(iid)
+
                 requester = str(row.get("slack_user_name") or "").strip()
                 if not requester:
                     requester = str(row.get("slack_user_id") or "").strip()
@@ -1746,6 +1837,7 @@ def start_log_window_thread():
                 status_value = str(row.get("status") or "").strip()
 
                 values = (
+                    "☑" if iid in checked_ids else "☐",
                     requester,
                     "Y" if status_value in ["완료", "중복팝업", "오류"] else "N",
                     "Y" if status_value == "중복팝업" else "N",
@@ -1766,14 +1858,19 @@ def start_log_window_thread():
             for iid in existing_ids:
                 tree.delete(iid)
 
-            root.after(1500, _refresh)
+            for iid in list(checked_ids):
+                if iid not in db_ids:
+                    checked_ids.discard(iid)
 
-        _refresh()
+        def _refresh_loop():
+            _refresh_once()
+            root.after(1500, _refresh_loop)
+
+        _refresh_loop()
         root.mainloop()
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
-
 
 # =========================
 # 워커
