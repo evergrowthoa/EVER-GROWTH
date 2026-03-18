@@ -1037,6 +1037,17 @@ def slack_upload_file_and_reply(channel_id: str, thread_ts: str, text: str, file
             )
     except SlackApiError as e:
         print("⚠️ Slack 파일 업로드/답장 실패:", e)
+        try:
+            fallback_text = text
+            if file_path and os.path.isfile(file_path):
+                fallback_text += f"\n(캡처 업로드 실패: {os.path.basename(file_path)})"
+            slack_client.chat_postMessage(
+                channel=channel_id,
+                thread_ts=thread_ts,
+                text=fallback_text,
+            )
+        except Exception as e2:
+            print("⚠️ Slack fallback 텍스트 답장도 실패:", e2)
 
 
 def wait_install_env_ready(d, timeout_sec: float = 8.0) -> bool:
