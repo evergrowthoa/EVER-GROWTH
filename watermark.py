@@ -1248,6 +1248,22 @@ def save_device_screenshot(d, prefix: str, watermark8: str) -> str:
         except Exception:
             pass
 
+    def _normalize_png_bytes(raw: bytes) -> bytes:
+        if not raw:
+            return b""
+
+        sig = b"\x89PNG\r\n\x1a\n"
+        idx = raw.find(sig)
+        if idx >= 0:
+            raw = raw[idx:]
+        else:
+            idx2 = raw.find(b"\x89PNG")
+            if idx2 >= 0:
+                raw = raw[idx2:]
+
+        raw = raw.replace(b"\r\r\n", b"\n")
+        return raw
+
     def _capture_by_adb_exec_out() -> bool:
         adb_exe = _resolve_adb_executable()
         if not adb_exe:
@@ -1266,7 +1282,7 @@ def save_device_screenshot(d, prefix: str, watermark8: str) -> str:
                 print("⚠️ adb exec-out 캡처 실패:", err)
                 return False
 
-            png_bytes = result.stdout or b""
+            png_bytes = _normalize_png_bytes(result.stdout or b"")
             if not png_bytes.startswith(b"\x89PNG"):
                 print("⚠️ adb exec-out 캡처 실패: PNG 헤더 아님")
                 return False
@@ -1311,7 +1327,7 @@ def save_device_screenshot(d, prefix: str, watermark8: str) -> str:
             if not shot_ok:
                 return False
 
-            time.sleep(0.8)
+            time.sleep(1.0)
 
             try:
                 d.pull(remote_path, local_path)
@@ -1357,7 +1373,7 @@ def save_device_screenshot(d, prefix: str, watermark8: str) -> str:
             return local_path
 
         _cleanup_local()
-        time.sleep(0.6)
+        time.sleep(0.8)
 
     print("📸 마지막 폴백 - uiautomator2 screenshot")
     if _capture_by_u2_fallback():
@@ -1717,6 +1733,9 @@ def process_one_job(d, job: dict):
             last_reason = "일반 탭 복구 실패"
             time.sleep(1.0)
             continue
+
+        print("⏳ 주문현황 리스트 로딩 안정화 대기 5초")
+        time.sleep(5.0)
 
         edit = find_search_edittext(d)
         if edit is None:
