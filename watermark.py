@@ -545,7 +545,8 @@ def slack_poll_loop():
                     slack_reply_in_thread(
                         channel_id=SLACK_CHANNEL_ID,
                         thread_ts=thread_ts,
-                        text="조회요청 양식확인부탁드립니다.",
+                        text="조회요청 양식확인부탁드립니다." \
+                        "[물마크12345678] 또는 [물마크 12345678]",
                     )
                     continue
 
