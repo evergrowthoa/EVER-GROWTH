@@ -1794,7 +1794,7 @@ def start_log_window_thread():
 
         tree = ttk.Treeview(top, columns=cols, show="headings", height=25)
 
-        tree.heading("requester", text="문의한사람")
+        tree.heading("requester", text="요청자")
         tree.heading("processed", text="처리완료여부")
         tree.heading("duplicated", text="중복여부")
         tree.heading("watermark8", text="물마크번호")
