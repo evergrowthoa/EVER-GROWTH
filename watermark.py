@@ -14,7 +14,7 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 
-BUILD_ID = "DIGITAL_SALES_SLACK_WATERMARK_2026-03-18_001"
+BUILD_ID = "DIGITAL_SALES_SLACK_WATERMARK_2026-03-18_002"
 print("✅ BUILD:", BUILD_ID)
 
 # =========================
@@ -25,7 +25,7 @@ DIGITAL_SALES_APP_NAME = "디지털세일즈"
 DIGITAL_SALES_PACKAGE = ""
 
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "").strip()
-SLACK_CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID", "").strip()
+SLACK_CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID", "C0AM6V8LEF8").strip()
 
 ENABLE_TELEGRAM_NOTIFY = True
 TELEGRAM_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "8777418618:AAGNdHu1C6Lz5yQJn8Xq1hCxWhEUp8Ao4O8").strip()
