@@ -8,6 +8,8 @@ import threading
 import traceback
 import urllib.request
 import urllib.error
+import subprocess
+import shutil
 import tkinter as tk
 from tkinter import ttk
 
@@ -572,9 +574,9 @@ def slack_poll_loop():
                     slack_reply_in_thread(
                         channel_id=SLACK_CHANNEL_ID,
                         thread_ts=thread_ts,
-                        text=f"조회 접수 / 물마크 {watermark8}",
+                        text=f"물마크 {watermark8}",
                     )
-                    notify_progress(f"Slack 조회 접수: 물마크 {watermark8}")
+                    notify_progress(f"Slack 물마크 {watermark8}")
 
         except Exception as e:
             print("❌ Slack polling 예외:", e)
@@ -1180,6 +1182,47 @@ def screenshots_dir():
     return path
 
 
+def _resolve_adb_executable() -> str:
+    candidates = []
+
+    for env_key in ["ADB_EXE", "ADB_PATH"]:
+        v = str(os.environ.get(env_key) or "").strip().strip('"')
+        if v:
+            candidates.append(v)
+
+    for cmd in ["adb", "adb.exe"]:
+        found = shutil.which(cmd)
+        if found:
+            candidates.append(found)
+
+    sdk_roots = [
+        str(os.environ.get("ANDROID_SDK_ROOT") or "").strip(),
+        str(os.environ.get("ANDROID_HOME") or "").strip(),
+        os.path.join(str(os.environ.get("LOCALAPPDATA") or "").strip(), "Android", "Sdk"),
+        os.path.join(os.path.expanduser("~"), "AppData", "Local", "Android", "Sdk"),
+    ]
+
+    for root in sdk_roots:
+        if not root:
+            continue
+        candidates.append(os.path.join(root, "platform-tools", "adb.exe"))
+        candidates.append(os.path.join(root, "platform-tools", "adb"))
+
+    seen = set()
+    for c in candidates:
+        cc = str(c or "").strip().strip('"')
+        if not cc:
+            continue
+        cc = os.path.normpath(cc)
+        if cc in seen:
+            continue
+        seen.add(cc)
+        if os.path.isfile(cc):
+            return cc
+
+    return ""
+
+
 def save_device_screenshot(d, prefix: str, watermark8: str) -> str:
     stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
     filename = f"{prefix}_{watermark8}_{stamp}.png"
@@ -1198,14 +1241,51 @@ def save_device_screenshot(d, prefix: str, watermark8: str) -> str:
         except Exception:
             return False
 
-    for attempt in range(1, 4):
+    def _cleanup_local():
         try:
-            try:
-                if os.path.isfile(local_path):
-                    os.remove(local_path)
-            except Exception:
-                pass
+            if os.path.isfile(local_path):
+                os.remove(local_path)
+        except Exception:
+            pass
 
+    def _capture_by_adb_exec_out() -> bool:
+        adb_exe = _resolve_adb_executable()
+        if not adb_exe:
+            print("⚠️ adb exec-out 캡처 실패: adb.exe 경로를 찾지 못함")
+            return False
+
+        try:
+            result = subprocess.run(
+                [adb_exe, "-s", ADB_SERIAL, "exec-out", "screencap", "-p"],
+                capture_output=True,
+                timeout=15,
+            )
+
+            if result.returncode != 0:
+                err = (result.stderr or b"").decode("utf-8", errors="ignore").strip()
+                print("⚠️ adb exec-out 캡처 실패:", err)
+                return False
+
+            png_bytes = result.stdout or b""
+            if not png_bytes.startswith(b"\x89PNG"):
+                print("⚠️ adb exec-out 캡처 실패: PNG 헤더 아님")
+                return False
+
+            with open(local_path, "wb") as f:
+                f.write(png_bytes)
+
+            if not _is_valid_png(local_path):
+                print("⚠️ adb exec-out 캡처 실패: 저장 후 PNG 유효성 불일치")
+                return False
+
+            return True
+
+        except Exception as e:
+            print("⚠️ adb exec-out 캡처 예외:", e)
+            return False
+
+    def _capture_by_remote_file() -> bool:
+        try:
             try:
                 d.shell(["rm", "-f", remote_path])
             except Exception:
@@ -1217,7 +1297,7 @@ def save_device_screenshot(d, prefix: str, watermark8: str) -> str:
                 d.shell(["screencap", "-p", remote_path])
                 shot_ok = True
             except Exception as e:
-                print(f"⚠️ 캡처 {attempt}차 screencap 1단계 실패:", e)
+                print("⚠️ 기기 내부 캡처 1차 실패:", e)
                 shot_ok = False
 
             if not shot_ok:
@@ -1225,48 +1305,64 @@ def save_device_screenshot(d, prefix: str, watermark8: str) -> str:
                     d.shell(["sh", "-c", f"screencap -p {remote_path}"])
                     shot_ok = True
                 except Exception as e:
-                    print(f"⚠️ 캡처 {attempt}차 screencap 2단계 실패:", e)
+                    print("⚠️ 기기 내부 캡처 2차 실패:", e)
                     shot_ok = False
 
             if not shot_ok:
-                time.sleep(0.6)
-                continue
+                return False
 
             time.sleep(0.8)
 
-            pulled = False
             try:
                 d.pull(remote_path, local_path)
-                pulled = True
             except Exception as e:
-                print(f"⚠️ 캡처 {attempt}차 pull 실패:", e)
-                pulled = False
+                print("⚠️ 기기 내부 캡처 pull 실패:", e)
+                return False
+            finally:
+                try:
+                    d.shell(["rm", "-f", remote_path])
+                except Exception:
+                    pass
 
-            try:
-                d.shell(["rm", "-f", remote_path])
-            except Exception:
-                pass
-
-            if pulled and _is_valid_png(local_path):
-                print("📸 캡처 저장:", local_path)
-                return local_path
-
-            print(f"⚠️ 캡처 {attempt}차 실패: 로컬 PNG 유효성 불일치")
-            time.sleep(0.6)
+            return _is_valid_png(local_path)
 
         except Exception as e:
-            print(f"⚠️ 캡처 {attempt}차 전체 예외:", e)
-            time.sleep(0.6)
+            print("⚠️ 기기 내부 캡처 예외:", e)
+            return False
 
-    try:
-        img = d.screenshot()
-        if img is not None:
+    def _capture_by_u2_fallback() -> bool:
+        try:
+            img = d.screenshot()
+            if img is None:
+                return False
             img.save(local_path)
-            if _is_valid_png(local_path):
-                print("📸 캡처 저장(폴백):", local_path)
-                return local_path
-    except Exception as e:
-        print("⚠️ 캡처 폴백 실패:", e)
+            return _is_valid_png(local_path)
+        except Exception as e:
+            print("⚠️ u2 폴백 캡처 실패:", e)
+            return False
+
+    for attempt in range(1, 4):
+        _cleanup_local()
+
+        print(f"📸 캡처 시도 {attempt}/3 - adb exec-out 우선")
+        if _capture_by_adb_exec_out():
+            print("📸 캡처 저장:", local_path)
+            return local_path
+
+        _cleanup_local()
+
+        print(f"📸 캡처 시도 {attempt}/3 - 기기 내부 파일 방식")
+        if _capture_by_remote_file():
+            print("📸 캡처 저장:", local_path)
+            return local_path
+
+        _cleanup_local()
+        time.sleep(0.6)
+
+    print("📸 마지막 폴백 - uiautomator2 screenshot")
+    if _capture_by_u2_fallback():
+        print("📸 캡처 저장(폴백):", local_path)
+        return local_path
 
     print("⚠️ 캡처 최종 실패")
     return ""
