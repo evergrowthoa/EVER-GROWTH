@@ -535,11 +535,6 @@ def slack_poll_loop():
                 row = db_get_job_by_message_ts(message_ts)
                 if row:
                     job_q.put(dict(row))
-                    slack_reply_in_thread(
-                        channel_id=SLACK_CHANNEL_ID,
-                        thread_ts=thread_ts,
-                        text=f"물마크 {watermark8}",
-                    )
                     notify_progress(f"Slack 물마크 {watermark8}")
 
         except Exception as e:
@@ -1593,7 +1588,7 @@ def process_one_job(d, job: dict):
         time.sleep(1.5)
 
         if is_duplicate_watermark_popup_open(d):
-            reply_text = "🚨물마크 중복입니다🚨"
+            reply_text = f"물마크 {watermark8}\n🚨물마크 중복입니다🚨"
             mention = _mention_text()
             if mention:
                 reply_text += f"\n{mention}"
@@ -1611,7 +1606,7 @@ def process_one_job(d, job: dict):
             _final_reset()
             return True
 
-        reply_text = "💠물마크 사용가능💠"
+        reply_text = f"물마크 {watermark8}\n💠물마크 사용가능💠"
         mention = _mention_text()
         if mention:
             reply_text += f"\n{mention}"
