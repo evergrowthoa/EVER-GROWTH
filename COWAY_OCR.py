@@ -7508,7 +7508,7 @@ while True:
             "third_install_shape": third_install_shape,
             "third_watermark_no": third_watermark_no,
         })
-
+#테스트
         current_status = row.get("status", STATUS_NEW) if row else STATUS_NEW
 
         print("\n✅ 고객 감지/DB 저장")
