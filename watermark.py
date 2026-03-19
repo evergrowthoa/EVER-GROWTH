@@ -1588,7 +1588,7 @@ def process_one_job(d, job: dict):
         time.sleep(1.5)
 
         if is_duplicate_watermark_popup_open(d):
-            reply_text = f"물마크 {watermark8}\n🚨물마크 중복입니다🚨"
+            reply_text = f"물마크 {watermark8}\n물마크 중복입니다"
             mention = _mention_text()
             if mention:
                 reply_text += f"\n{mention}"
@@ -1601,12 +1601,12 @@ def process_one_job(d, job: dict):
             if ok_sent:
                 db_mark_job_replied(message_ts)
 
-            db_update_job_status(message_ts, "중복팝업", "🚨물마크 중복 팝업🚨")
-            notify_progress(f"🚨물마크 중복 팝업🚨 / 물마크 {watermark8}")
+            db_update_job_status(message_ts, "중복팝업", "물마크 중복 팝업")
+            notify_progress(f"물마크 중복 팝업 / 물마크 {watermark8}")
             _final_reset()
             return True
 
-        reply_text = f"물마크 {watermark8}\n💠물마크 사용가능💠"
+        reply_text = f"물마크 {watermark8}\n물마크 사용가능"
         mention = _mention_text()
         if mention:
             reply_text += f"\n{mention}"
@@ -1620,7 +1620,7 @@ def process_one_job(d, job: dict):
             db_mark_job_replied(message_ts)
 
         db_update_job_status(message_ts, "완료", "")
-        notify_success(f"물마크 {watermark8} / 💠물마크 사용가능💠")
+        notify_success(f"물마크 {watermark8} / 물마크 사용가능")
         _final_reset()
         return True
 
