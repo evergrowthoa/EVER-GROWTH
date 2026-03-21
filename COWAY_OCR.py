@@ -27,7 +27,7 @@ print("✅ BUILD:", BUILD_ID)
 USER_ID = "evergrowth"
 USER_PW = "wkrlfjqm1!"
 
-ADB_SERIAL = "emulator-5554"
+ADB_SERIAL = "127.0.0.1:5555"
 DO_EMULATOR = True
 
 DIGITAL_SALES_APP_NAME = "디지털세일즈"
@@ -881,9 +881,13 @@ def start_record_window_thread():
         root = tk.Tk()
         root.title("COWAY 진행기록")
         root.geometry("1280x620")
+        root.minsize(1280, 620)
+
+        ctrl = ttk.Frame(root, padding=8)
+        ctrl.pack(side="bottom", fill="x")
 
         top = ttk.Frame(root, padding=8)
-        top.pack(fill="both", expand=True)
+        top.pack(side="top", fill="both", expand=True)
 
         cols = ("name", "phone11", "status", "last_status", "last_error", "note", "updated_at")
         tree = ttk.Treeview(top, columns=cols, show="headings", height=20)
@@ -913,9 +917,6 @@ def start_record_window_thread():
         top.rowconfigure(0, weight=1)
         top.columnconfigure(0, weight=1)
 
-        ctrl = ttk.Frame(root, padding=8)
-        ctrl.pack(fill="x")
-
         selected_phone = {"value": ""}
 
         ttk.Label(ctrl, text="상태").grid(row=0, column=0, padx=4, pady=4, sticky="w")
@@ -933,6 +934,7 @@ def start_record_window_thread():
         note_entry = ttk.Entry(ctrl, width=50)
         note_entry.grid(row=0, column=3, padx=4, pady=4, sticky="we")
         ctrl.columnconfigure(3, weight=1)
+        ctrl.rowconfigure(0, weight=1)
 
         def _selected_phone():
             items = tree.selection()
@@ -1062,14 +1064,14 @@ def start_record_window_thread():
             sync_runtime_state_from_db()
             _load_selected()
 
-        ttk.Button(ctrl, text="메모저장", command=_save_note).grid(row=0, column=4, padx=4, pady=4)
-        ttk.Button(ctrl, text="상태적용", command=_apply_status).grid(row=0, column=5, padx=4, pady=4)
-        ttk.Button(ctrl, text="재개", command=_resume).grid(row=0, column=6, padx=4, pady=4)
-        ttk.Button(ctrl, text="취소", command=_cancel).grid(row=0, column=7, padx=4, pady=4)
-        ttk.Button(ctrl, text="삭제", command=_delete).grid(row=0, column=8, padx=4, pady=4)
-        ttk.Button(ctrl, text="보류", command=_hold).grid(row=0, column=9, padx=4, pady=4)
-        ttk.Button(ctrl, text="완료", command=_done).grid(row=0, column=10, padx=4, pady=4)
-        ttk.Button(ctrl, text="다음확인 즉시", command=_force_check).grid(row=0, column=11, padx=4, pady=4)
+        ttk.Button(ctrl, text="메모저장", command=_save_note).grid(row=0, column=4, padx=4, pady=4, sticky="ew")
+        ttk.Button(ctrl, text="상태적용", command=_apply_status).grid(row=0, column=5, padx=4, pady=4, sticky="ew")
+        ttk.Button(ctrl, text="재개", command=_resume).grid(row=0, column=6, padx=4, pady=4, sticky="ew")
+        ttk.Button(ctrl, text="취소", command=_cancel).grid(row=0, column=7, padx=4, pady=4, sticky="ew")
+        ttk.Button(ctrl, text="삭제", command=_delete).grid(row=0, column=8, padx=4, pady=4, sticky="ew")
+        ttk.Button(ctrl, text="보류", command=_hold).grid(row=0, column=9, padx=4, pady=4, sticky="ew")
+        ttk.Button(ctrl, text="완료", command=_done).grid(row=0, column=10, padx=4, pady=4, sticky="ew")
+        ttk.Button(ctrl, text="다음확인 즉시", command=_force_check).grid(row=0, column=11, padx=4, pady=4, sticky="ew")
 
         tree.bind("<<TreeviewSelect>>", _load_selected)
 
