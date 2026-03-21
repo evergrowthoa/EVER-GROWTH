@@ -275,7 +275,9 @@ def init_db():
                     address_detail TEXT DEFAULT '',
                     manage_raw TEXT DEFAULT '',
                     contract_raw TEXT DEFAULT '',
+                    regulation_raw TEXT DEFAULT '',
                     discount_raw TEXT DEFAULT '',
+                    promotion_raw TEXT DEFAULT '',
                     amount_raw TEXT DEFAULT '',
                     pickup_request_raw TEXT DEFAULT '',
                     special_note_raw TEXT DEFAULT '',
@@ -306,6 +308,8 @@ def init_db():
                 ("third_product_kind", "TEXT DEFAULT ''"),
                 ("third_install_shape", "TEXT DEFAULT ''"),
                 ("third_watermark_no", "TEXT DEFAULT ''"),
+                ("regulation_raw", "TEXT DEFAULT ''"),
+                ("promotion_raw", "TEXT DEFAULT ''"),
             ]
 
             existing_cols = set()
@@ -326,31 +330,6 @@ def init_db():
             conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_updated_at ON jobs(updated_at DESC)")
             conn.commit()
-        finally:
-            conn.close()
-
-def db_get_job(phone11: str):
-    if not phone11:
-        return None
-    with db_lock:
-        conn = _db_conn()
-        try:
-            cur = conn.execute("SELECT * FROM jobs WHERE phone11 = ?", (phone11,))
-            row = cur.fetchone()
-            return dict(row) if row else None
-        finally:
-            conn.close()
-
-def db_list_all_jobs():
-    with db_lock:
-        conn = _db_conn()
-        try:
-            cur = conn.execute("""
-                SELECT *
-                FROM jobs
-                ORDER BY updated_at DESC, created_at DESC, phone11 DESC
-            """)
-            return [dict(r) for r in cur.fetchall()]
         finally:
             conn.close()
 
@@ -375,7 +354,9 @@ def db_upsert_job_from_modal(data: dict):
         "address_detail": str(data.get("address_detail") or "").strip(),
         "manage_raw": str(data.get("manage_raw") or "").strip(),
         "contract_raw": str(data.get("contract_raw") or "").strip(),
+        "regulation_raw": str(data.get("regulation_raw") or "").strip(),
         "discount_raw": str(data.get("discount_raw") or "").strip(),
+        "promotion_raw": str(data.get("promotion_raw") or "").strip(),
         "amount_raw": str(data.get("amount_raw") or "").strip(),
         "pickup_request_raw": str(data.get("pickup_request_raw") or "").strip(),
         "special_note_raw": str(data.get("special_note_raw") or "").strip(),
@@ -408,7 +389,9 @@ def db_upsert_job_from_modal(data: dict):
                             address_detail = ?,
                             manage_raw = ?,
                             contract_raw = ?,
+                            regulation_raw = ?,
                             discount_raw = ?,
+                            promotion_raw = ?,
                             amount_raw = ?,
                             pickup_request_raw = ?,
                             special_note_raw = ?,
@@ -439,7 +422,9 @@ def db_upsert_job_from_modal(data: dict):
                         payload["address_detail"],
                         payload["manage_raw"],
                         payload["contract_raw"],
+                        payload["regulation_raw"],
                         payload["discount_raw"],
+                        payload["promotion_raw"],
                         payload["amount_raw"],
                         payload["pickup_request_raw"],
                         payload["special_note_raw"],
@@ -468,7 +453,9 @@ def db_upsert_job_from_modal(data: dict):
                             address_detail = ?,
                             manage_raw = ?,
                             contract_raw = ?,
+                            regulation_raw = ?,
                             discount_raw = ?,
+                            promotion_raw = ?,
                             amount_raw = ?,
                             pickup_request_raw = ?,
                             special_note_raw = ?,
@@ -493,7 +480,9 @@ def db_upsert_job_from_modal(data: dict):
                         payload["address_detail"],
                         payload["manage_raw"],
                         payload["contract_raw"],
+                        payload["regulation_raw"],
                         payload["discount_raw"],
+                        payload["promotion_raw"],
                         payload["amount_raw"],
                         payload["pickup_request_raw"],
                         payload["special_note_raw"],
@@ -512,13 +501,13 @@ def db_upsert_job_from_modal(data: dict):
                         phone11, name, birth, account, zipcode,
                         product_name, model_name, color_raw,
                         address, address_basic, address_detail,
-                        manage_raw, contract_raw, discount_raw, amount_raw,
+                        manage_raw, contract_raw, regulation_raw, discount_raw, promotion_raw, amount_raw,
                         pickup_request_raw, special_note_raw,
                         third_brand, third_install_mfg, third_product_type,
                         third_product_kind, third_install_shape, third_watermark_no,
                         status, auth_sent_at, next_check_at, last_check_at,
                         last_status, last_error, note, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     phone11,
                     payload["name"],
@@ -533,7 +522,9 @@ def db_upsert_job_from_modal(data: dict):
                     payload["address_detail"],
                     payload["manage_raw"],
                     payload["contract_raw"],
+                    payload["regulation_raw"],
                     payload["discount_raw"],
+                    payload["promotion_raw"],
                     payload["amount_raw"],
                     payload["pickup_request_raw"],
                     payload["special_note_raw"],
