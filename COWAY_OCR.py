@@ -1186,6 +1186,68 @@ def debug_modal_inputs(modal):
         print("DEBUG 실패:", e)
     print("----- [DEBUG] 끝 -----")
 
+ALLOWED_REGULATION_SET = {"보상", "보상/후결합", "신규", "신규/후결합"}
+
+def normalize_regulation_value(raw: str) -> str:
+    s = str(raw or "").strip()
+    s = s.replace("[", "").replace("]", "")
+    s = re.sub(r"\s+", "", s)
+
+    mapping = {
+        "보상": "보상",
+        "보상/후결합": "보상/후결합",
+        "신규": "신규",
+        "신규/후결합": "신규/후결합",
+    }
+
+    return mapping.get(s, s)
+
+def is_compensation_regulation(raw: str) -> bool:
+    reg = normalize_regulation_value(raw)
+    return reg in {"보상", "보상/후결합"}
+
+def normalize_promotion_value(raw: str) -> str:
+    s = str(raw or "").strip()
+    s = re.sub(r"\s+", "", s)
+    return s
+
+def validate_job_for_pass_flow(job: dict):
+    name = str(job.get("name") or "").strip()
+    phone11 = str(job.get("phone11") or "").strip()
+    regulation_raw = str(job.get("regulation_raw") or "").strip()
+    promotion_raw = str(job.get("promotion_raw") or "").strip()
+
+    reg = normalize_regulation_value(regulation_raw)
+    promo = normalize_promotion_value(promotion_raw)
+
+    if not reg:
+        return (False, f"진행 중단: 규정 추출 실패 / 고객={name} / 연락처={phone11}")
+
+    if reg not in ALLOWED_REGULATION_SET:
+        return (False, f"진행 중단: 허용되지 않은 규정 / 고객={name} / 연락처={phone11} / 규정={regulation_raw}")
+
+    if not promo:
+        return (False, f"진행 중단: 프로모션 추출 실패 / 고객={name} / 연락처={phone11} / 규정={reg}")
+
+    if is_compensation_regulation(reg):
+        required_map = {
+            "타사브랜드": str(job.get("third_brand") or "").strip(),
+            "타사설치/제조년월": str(job.get("third_install_mfg") or "").strip(),
+            "타사제품타입": str(job.get("third_product_type") or "").strip(),
+            "타사제품종류": str(job.get("third_product_kind") or "").strip(),
+            "타사설치형태": str(job.get("third_install_shape") or "").strip(),
+            "타사물마크번호": str(job.get("third_watermark_no") or "").strip(),
+        }
+
+        missing = [k for k, v in required_map.items() if not v]
+        if missing:
+            return (
+                False,
+                f"진행 중단: 보상 규정 필수 타사정보 누락 / 고객={name} / 연락처={phone11} / 규정={reg} / 누락={', '.join(missing)}"
+            )
+
+    return (True, "")
+
 def extract_fields_from_modal(modal):
     def _find_special_note_text():
         try:
@@ -1281,10 +1343,18 @@ def extract_fields_from_modal(modal):
         modal,
         ["약정", "약정기간", "의무사용기간", "의무 사용기간", "계약기간", "사용기간"]
     )
+    regulation_raw = find_input_near_label(
+        modal,
+        ["규정", "판매규정", "진행규정"]
+    )
 
     discount_raw = find_input_near_label(
         modal,
-        ["할인", "할인유형", "할인 유형", "반값", "프로모션", "혜택"]
+        ["할인", "할인유형", "할인 유형", "반값"]
+    )
+    promotion_raw = find_input_near_label(
+        modal,
+        ["프로모션", "혜택"]
     )
     amount_raw = find_input_near_label(
         modal,
@@ -1327,7 +1397,9 @@ def extract_fields_from_modal(modal):
         "address_detail": (address_detail or "").strip(),
         "manage_raw": (manage_raw or "").strip(),
         "contract_raw": (contract_raw or "").strip(),
+        "regulation_raw": (regulation_raw or "").strip(),
         "discount_raw": (discount_raw or "").strip(),
+        "promotion_raw": (promotion_raw or "").strip(),
         "amount_raw": (amount_raw or "").strip(),
         "pickup_request_raw": (pickup_request_raw or "").strip(),
         "special_note_raw": (special_note_raw or "").strip(),
@@ -3508,12 +3580,73 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
 
         return _abort(f"전자서명 중단: 상품 담기 완료 팝업 미검출 / 고객={job['name']}")
 
-    def _verify_discount_and_amount_then_next(discount_raw: str, amount_raw: str) -> bool:
+    def _promotion_page_has_target(promotion_raw: str) -> bool:
+        target_promo = normalize_promotion_value(promotion_raw)
+        if not target_promo:
+            return False
+
+        try:
+            if d(text="프로모션").exists:
+                click_text_center(d, "프로모션", 0.10, 0.45)
+                time.sleep(0.8)
+        except Exception:
+            pass
+
+        merged_texts = []
+        seen = set()
+
+        items = _collect_visible_text_items(0.05, 0.98)
+        for it in items:
+            norm = normalize_promotion_value(it["text"])
+            if norm and norm not in seen:
+                merged_texts.append(norm)
+                seen.add(norm)
+
+        xml = ""
+        try:
+            xml = d.dump_hierarchy()
+        except Exception:
+            xml = ""
+
+        if xml:
+            try:
+                xml_texts = re.findall(r'text="([^"]*)"', xml)
+                for raw in xml_texts:
+                    norm = normalize_promotion_value(raw)
+                    if norm and norm not in seen:
+                        merged_texts.append(norm)
+                        seen.add(norm)
+            except Exception:
+                pass
+
+            try:
+                xml_descs = re.findall(r'content-desc="([^"]*)"', xml)
+                for raw in xml_descs:
+                    norm = normalize_promotion_value(raw)
+                    if norm and norm not in seen:
+                        merged_texts.append(norm)
+                        seen.add(norm)
+            except Exception:
+                pass
+
+        for t in merged_texts:
+            if target_promo == t or target_promo in t or t in target_promo:
+                print(f"✅ [ready_sign] 프로모션 일치 확인: {promotion_raw}")
+                return True
+
+        print(f"❌ [ready_sign] 프로모션 불일치: 모달={promotion_raw}")
+        return False
+
+    def _verify_discount_and_amount_then_next(discount_raw: str, promotion_raw: str, amount_raw: str) -> bool:
         target_discount = _normalize_discount_target(discount_raw)
         expected_amount_digits = _normalize_amount_digits(amount_raw)
+        target_promotion = normalize_promotion_value(promotion_raw)
 
         if not target_discount:
             return _abort(f"전자서명 중단: 모달 할인 추출 실패 / 고객={job['name']} / 원본할인={discount_raw}")
+
+        if not target_promotion:
+            return _abort(f"전자서명 중단: 모달 프로모션 추출 실패 / 고객={job['name']} / 원본프로모션={promotion_raw}")
 
         if not expected_amount_digits:
             return _abort(f"전자서명 중단: 모달 금액 추출 실패 / 고객={job['name']} / 원본금액={amount_raw}")
@@ -3522,6 +3655,7 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
             return _abort(f"전자서명 중단: 할인정보 입력 화면 준비 실패 / 고객={job['name']}")
 
         found_discount = False
+        found_promotion = False
         total_ok = False
 
         for step in range(8):
@@ -3532,10 +3666,13 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
                 found_discount = True
                 print(f"✅ [ready_sign] 할인 일치 확인: {target_discount}")
 
+            if not found_promotion and _promotion_page_has_target(target_promotion):
+                found_promotion = True
+
             if _verify_total_amount_row(expected_amount_digits):
                 total_ok = True
 
-            if found_discount and total_ok:
+            if found_discount and found_promotion and total_ok:
                 if not d(text="다음").exists:
                     return _abort(f"전자서명 중단: 할인정보 입력 페이지 다음 버튼 미검출 / 고객={job['name']}")
 
@@ -3544,7 +3681,7 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
                     return _abort(f"전자서명 중단: 할인정보 입력 페이지 다음 버튼 클릭 실패 / 고객={job['name']}")
 
                 time.sleep(2.0)
-                print(f"✅ [ready_sign] 할인/총금액 검증 완료 후 다음 클릭: {job['name']}")
+                print(f"✅ [ready_sign] 할인/프로모션/총금액 검증 완료 후 다음 클릭: {job['name']}")
                 return True
 
             if step < 7:
@@ -3554,6 +3691,11 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
         if not found_discount:
             return _abort(
                 f"전자서명 중단: 할인 불일치 / 고객={job['name']} / 모달할인={discount_raw} / 목표={target_discount}"
+            )
+
+        if not found_promotion:
+            return _abort(
+                f"전자서명 중단: 프로모션 불일치 / 고객={job['name']} / 모달프로모션={promotion_raw}"
             )
 
         return _abort(
@@ -6716,13 +6858,16 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
             if not discount_raw:
                 return _abort(f"전자서명 중단: 모달 할인 추출 실패 / 고객={job['name']}")
 
+            if not promotion_raw:
+                return _abort(f"전자서명 중단: 모달 프로모션 추출 실패 / 고객={job['name']}")
+
             if not amount_raw:
                 return _abort(f"전자서명 중단: 모달 금액 추출 실패 / 고객={job['name']}")
 
             if not account_raw:
                 return _abort(f"전자서명 중단: 모달 결제정보 추출 실패 / 고객={job['name']}")
 
-            if not _verify_discount_and_amount_then_next(discount_raw, amount_raw):
+            if not _verify_discount_and_amount_then_next(discount_raw, promotion_raw, amount_raw):
                 return False
 
             if not _open_payment_method_and_click_add(account_raw):
@@ -6984,7 +7129,9 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
         color_raw = (job.get("color_raw") or "").strip()
         manage_raw = (job.get("manage_raw") or "").strip()
         contract_raw = (job.get("contract_raw") or "").strip()
+        regulation_raw = (job.get("regulation_raw") or "").strip()
         discount_raw = (job.get("discount_raw") or "").strip()
+        promotion_raw = (job.get("promotion_raw") or "").strip()
         amount_raw = (job.get("amount_raw") or "").strip()
         account_raw = (job.get("account") or "").strip()
         phone11 = (job.get("phone11") or "").strip()
@@ -6993,6 +7140,16 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
         address_detail = (job.get("address_detail") or "").strip()
         pickup_request_raw = (job.get("pickup_request_raw") or "").strip()
         special_note_raw = (job.get("special_note_raw") or "").strip()
+        third_brand = (job.get("third_brand") or "").strip()
+        third_install_mfg = (job.get("third_install_mfg") or "").strip()
+        third_product_type = (job.get("third_product_type") or "").strip()
+        third_product_kind = (job.get("third_product_kind") or "").strip()
+        third_install_shape = (job.get("third_install_shape") or "").strip()
+        third_watermark_no = (job.get("third_watermark_no") or "").strip()
+
+        valid_ok, valid_reason = validate_job_for_pass_flow(job)
+        if not valid_ok:
+            return _abort(valid_reason)
 
         if not search_model:
             return _abort(f"전자서명 중단: 모달 모델명 추출 실패 / 고객={job['name']}")
@@ -7006,8 +7163,14 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
         if not contract_raw:
             return _abort(f"전자서명 중단: 모달 약정 추출 실패 / 고객={job['name']} / 모델={search_model}")
 
+        if not regulation_raw:
+            return _abort(f"전자서명 중단: 모달 규정 추출 실패 / 고객={job['name']} / 모델={search_model}")
+
         if not discount_raw:
             return _abort(f"전자서명 중단: 모달 할인 추출 실패 / 고객={job['name']} / 모델={search_model}")
+
+        if not promotion_raw:
+            return _abort(f"전자서명 중단: 모달 프로모션 추출 실패 / 고객={job['name']} / 모델={search_model}")
 
         if not amount_raw:
             return _abort(f"전자서명 중단: 모달 금액 추출 실패 / 고객={job['name']} / 모델={search_model}")
@@ -7026,6 +7189,20 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
 
         if not address_detail:
             return _abort(f"전자서명 중단: 모달 상세주소 추출 실패 / 고객={job['name']} / 모델={search_model}")
+
+        if is_compensation_regulation(regulation_raw):
+            if not third_brand:
+                return _abort(f"전자서명 중단: 보상 규정인데 타사브랜드 누락 / 고객={job['name']}")
+            if not third_install_mfg:
+                return _abort(f"전자서명 중단: 보상 규정인데 타사 설치/제조년월 누락 / 고객={job['name']}")
+            if not third_product_type:
+                return _abort(f"전자서명 중단: 보상 규정인데 타사 제품타입 누락 / 고객={job['name']}")
+            if not third_product_kind:
+                return _abort(f"전자서명 중단: 보상 규정인데 타사 제품종류 누락 / 고객={job['name']}")
+            if not third_install_shape:
+                return _abort(f"전자서명 중단: 보상 규정인데 타사 설치형태 누락 / 고객={job['name']}")
+            if not third_watermark_no:
+                return _abort(f"전자서명 중단: 보상 규정인데 타사 물마크번호 누락 / 고객={job['name']}")
 
         if not d(text="주문 이어서 하기").exists:
             return _abort(f"전자서명 중단: 주문 이어서 하기 버튼 미검출 / 고객={job['name']}")
@@ -7451,7 +7628,9 @@ while True:
         address_detail = data.get("address_detail", "")
         manage_raw = data.get("manage_raw", "")
         contract_raw = data.get("contract_raw", "")
+        regulation_raw = data.get("regulation_raw", "")
         discount_raw = data.get("discount_raw", "")
+        promotion_raw = data.get("promotion_raw", "")
         amount_raw = data.get("amount_raw", "")
         pickup_request_raw = data.get("pickup_request_raw", "")
         special_note_raw = data.get("special_note_raw", "")
@@ -7488,7 +7667,9 @@ while True:
             "address_detail": address_detail,
             "manage_raw": manage_raw,
             "contract_raw": contract_raw,
+            "regulation_raw": regulation_raw,
             "discount_raw": discount_raw,
+            "promotion_raw": promotion_raw,
             "amount_raw": amount_raw,
             "pickup_request_raw": pickup_request_raw,
             "special_note_raw": special_note_raw,
@@ -7516,7 +7697,9 @@ while True:
         print("상세주소:", address_detail)
         print("관리:", manage_raw)
         print("약정:", contract_raw)
+        print("규정:", regulation_raw)
         print("할인:", discount_raw)
+        print("프로모션:", promotion_raw)
         print("금액:", amount_raw)
         print("기존 제품 수거:", pickup_request_raw)
         print("특이사항:", special_note_raw)
@@ -7528,6 +7711,29 @@ while True:
         print("타사정보-물마크번호:", third_watermark_no)
         print("현재상태:", current_status)
         print("-" * 40)
+
+        target_for_validate = row if row else {
+            "name": name,
+            "phone11": phone11,
+            "regulation_raw": regulation_raw,
+            "promotion_raw": promotion_raw,
+            "third_brand": third_brand,
+            "third_install_mfg": third_install_mfg,
+            "third_product_type": third_product_type,
+            "third_product_kind": third_product_kind,
+            "third_install_shape": third_install_shape,
+            "third_watermark_no": third_watermark_no,
+        }
+
+        valid_ok, valid_reason = validate_job_for_pass_flow(target_for_validate)
+        if not valid_ok:
+            print("🛑", valid_reason)
+            notify_error(valid_reason)
+            if row:
+                db_mark_hold(phone11, valid_reason)
+            sync_runtime_state_from_db()
+            time.sleep(1.2)
+            continue
 
         if row and current_status == STATUS_NEW and phone11 not in queued_new_phones:
             auth_q.put(dict(row))
