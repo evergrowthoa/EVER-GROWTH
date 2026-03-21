@@ -333,6 +333,31 @@ def init_db():
         finally:
             conn.close()
 
+def db_get_job(phone11: str):
+    if not phone11:
+        return None
+    with db_lock:
+        conn = _db_conn()
+        try:
+            cur = conn.execute("SELECT * FROM jobs WHERE phone11 = ?", (phone11,))
+            row = cur.fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+def db_list_all_jobs():
+    with db_lock:
+        conn = _db_conn()
+        try:
+            cur = conn.execute("""
+                SELECT *
+                FROM jobs
+                ORDER BY updated_at DESC, created_at DESC, phone11 DESC
+            """)
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
 def db_upsert_job_from_modal(data: dict):
     phone11 = str(data.get("phone11") or "").strip()
     if not phone11:
@@ -7459,7 +7484,7 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
         if not _click_add_product_and_go_discount():
             return False
 
-        if not _verify_discount_and_amount_then_next(discount_raw, amount_raw):
+        if not _verify_discount_and_amount_then_next(discount_raw, promotion_raw, amount_raw):
             return False
 
         if not _open_payment_method_and_click_add(account_raw):
