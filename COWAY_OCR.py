@@ -1610,29 +1610,112 @@ def adb_keyboard_input_text(raw_text: str) -> bool:
     print("⚠️ [adb_keyboard] ADB_INPUT_TEXT 실패:", err2 or out2)
     return False
 
-def click_text_center(d, txt: str, y_min_ratio: float = 0.0, y_max_ratio: float = 1.0) -> bool:
+def _safe_bounds_center(bounds: dict):
+    left = int(bounds.get("left", 0))
+    top = int(bounds.get("top", 0))
+    right = int(bounds.get("right", 0))
+    bottom = int(bounds.get("bottom", 0))
+    return ((left + right) // 2, (top + bottom) // 2)
+
+def _collect_text_bounds(d, text_exact: str = "", text_contains: str = "", y_min_ratio: float = 0.0, y_max_ratio: float = 1.0):
+    found = []
     try:
         w, h = d.window_size()
-        objs = d(text=txt).all()
-        for o in objs:
-            try:
-                b = o.info.get("bounds", {})
-                cx = (int(b.get("left", 0)) + int(b.get("right", 0))) // 2
-                cy = (int(b.get("top", 0)) + int(b.get("bottom", 0))) // 2
-                if cy < int(h * y_min_ratio) or cy > int(h * y_max_ratio):
-                    continue
-                d.click(cx, cy)
-                return True
-            except Exception:
-                continue
     except Exception:
-        pass
+        w, h = (1080, 1920)
+
+    selectors = []
+    if text_exact:
+        selectors.append(("exact", text_exact))
+    if text_contains:
+        selectors.append(("contains", text_contains))
+
+    seen = set()
+
+    for mode, value in selectors:
+        try:
+            objs = d(text=value) if mode == "exact" else d(textContains=value)
+            try:
+                cnt = objs.count
+            except Exception:
+                cnt = 0
+
+            for i in range(cnt):
+                try:
+                    o = objs[i]
+                    info = o.info or {}
+                    txt = str(info.get("text") or "").strip()
+                    b = info.get("bounds", {})
+                    left = int(b.get("left", 0))
+                    top = int(b.get("top", 0))
+                    right = int(b.get("right", 0))
+                    bottom = int(b.get("bottom", 0))
+                    cx, cy = _safe_bounds_center(b)
+
+                    if cy < int(h * y_min_ratio) or cy > int(h * y_max_ratio):
+                        continue
+                    if right <= left or bottom <= top:
+                        continue
+
+                    key = (txt, left, top, right, bottom)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+
+                    found.append({
+                        "text": txt,
+                        "bounds": (left, top, right, bottom),
+                        "center": (cx, cy),
+                    })
+                except Exception:
+                    continue
+        except Exception:
+            continue
+
+    found.sort(key=lambda x: (x["bounds"][1], x["bounds"][0]))
+    return found
+
+def _click_bounds_center(d, bounds_tuple):
+    try:
+        left, top, right, bottom = bounds_tuple
+        cx = (int(left) + int(right)) // 2
+        cy = (int(top) + int(bottom)) // 2
+        d.click(cx, cy)
+        return True
+    except Exception:
+        return False
+
+def click_text_center(d, txt: str, y_min_ratio: float = 0.0, y_max_ratio: float = 1.0) -> bool:
+    items = _collect_text_bounds(d, text_exact=txt, y_min_ratio=y_min_ratio, y_max_ratio=y_max_ratio)
+    for item in items:
+        try:
+            if _click_bounds_center(d, item["bounds"]):
+                return True
+        except Exception:
+            continue
+
+    items = _collect_text_bounds(d, text_contains=txt, y_min_ratio=y_min_ratio, y_max_ratio=y_max_ratio)
+    for item in items:
+        try:
+            if _click_bounds_center(d, item["bounds"]):
+                return True
+        except Exception:
+            continue
+
     try:
         if d(text=txt).exists:
             d(text=txt).click()
             return True
     except Exception:
-        return False
+        pass
+
+    try:
+        if d(textContains=txt).exists:
+            d(textContains=txt).click()
+            return True
+    except Exception:
+        pass
+
     return False
 
 def enable_fast_ime(d):
@@ -1982,10 +2065,10 @@ def ensure_general_tab(d, force_click: bool = False) -> bool:
 def enter_order_status(d) -> bool:
     """
     ✅ 모바일 주문 홈에서 '주문 이어하기 > 일반주문' 리스트로 진입
-    핵심:
-    - x는 '일반주문' 텍스트 bounds 기준이 아니라 화면 비율 기준으로 고정
-    - y만 일반주문 줄 중심값 사용
-    - 사용자가 표시한 빨간 박스(건수 + 파란 화살표) 영역을 직접 누름
+    변경:
+    - 화면 비율 고정 x 제거
+    - '일반주문' 텍스트가 있는 같은 행의 오른쪽 카드 영역을 상대적으로 클릭
+    - 마지막 fallback만 최소 비율좌표 사용
     """
     if d(text="주문현황").exists:
         return True
@@ -1995,92 +2078,65 @@ def enter_order_status(d) -> bool:
         return False
 
     try:
-        objs = d(text="일반주문")
-        try:
-            cnt = objs.count
-        except Exception:
-            cnt = 0
+        w, h = d.window_size()
 
-        target = None
-        best_top = 10**9
+        items = _collect_text_bounds(d, text_exact="일반주문", y_min_ratio=0.12, y_max_ratio=0.85)
+        if not items:
+            items = _collect_text_bounds(d, text_contains="일반주문", y_min_ratio=0.12, y_max_ratio=0.85)
 
-        for i in range(cnt):
-            try:
-                o = objs[i]
-                b = o.info.get("bounds", {})
-                left = int(b.get("left", 0))
-                top = int(b.get("top", 0))
-                right = int(b.get("right", 0))
-                bottom = int(b.get("bottom", 0))
-
-                if top < 300 or top > 1400:
-                    continue
-
-                if top < best_top:
-                    best_top = top
-                    target = (left, top, right, bottom)
-            except Exception:
-                continue
-
-        if target is None:
+        if not items:
             print("❌ [enter_order_status] 주문 이어하기의 일반주문 행을 찾지 못함")
             return False
 
-        left, top, right, bottom = target
+        target = items[0]
+        left, top, right, bottom = target["bounds"]
         cy = (top + bottom) // 2
-        w, h = d.window_size()
 
-        candidate_points = [
-            (int(w * 0.84), cy),
-            (int(w * 0.86), cy),
-            (int(w * 0.88), cy),
-            (int(w * 0.84), cy - 8),
-            (int(w * 0.86), cy - 8),
-            (int(w * 0.88), cy - 8),
-            (int(w * 0.84), cy + 8),
-            (int(w * 0.86), cy + 8),
-            (int(w * 0.88), cy + 8),
+        row_right_candidates = [
+            right + max(90, int(w * 0.10)),
+            right + max(140, int(w * 0.14)),
+            right + max(190, int(w * 0.18)),
+            w - max(120, int(w * 0.12)),
+            w - max(80, int(w * 0.08)),
         ]
 
+        candidate_points = []
         tried = set()
-        filtered_points = []
-        for x, y in candidate_points:
-            x = max(0, min(w - 10, int(x)))
-            y = max(0, min(h - 10, int(y)))
-            key = (x, y)
-            if key not in tried:
-                filtered_points.append((x, y))
-                tried.add(key)
 
-        for x, y in filtered_points:
+        for x in row_right_candidates:
+            for dy in [0, -10, 10]:
+                px = max(8, min(w - 8, int(x)))
+                py = max(8, min(h - 8, int(cy + dy)))
+                key = (px, py)
+                if key in tried:
+                    continue
+                tried.add(key)
+                candidate_points.append((px, py))
+
+        for x, y in candidate_points:
             d.click(x, y)
             time.sleep(1.2)
 
             if d(text="주문현황").exists:
                 ensure_general_tab(d, force_click=True)
                 time.sleep(0.4)
-                print("✅ [enter_order_status] 주문현황 진입 성공")
+                print(f"✅ [enter_order_status] 주문현황 진입 성공: ({x}, {y})")
                 return True
 
-        fallback_x1 = int(w * 0.82)
-        d.click(fallback_x1, cy)
-        time.sleep(1.2)
+        fallback_points = [
+            (int(w * 0.86), cy),
+            (int(w * 0.90), cy),
+        ]
 
-        if d(text="주문현황").exists:
-            ensure_general_tab(d, force_click=True)
-            time.sleep(0.4)
-            print("✅ [enter_order_status] 주문현황 진입 성공")
-            return True
+        for x, y in fallback_points:
+            d.click(int(x), int(y))
+            time.sleep(1.2)
 
-        fallback_x2 = int(w * 0.90)
-        d.click(fallback_x2, cy)
-        time.sleep(1.2)
-
-        if d(text="주문현황").exists:
-            ensure_general_tab(d, force_click=True)
-            time.sleep(0.4)
-            print("✅ [enter_order_status] 주문현황 진입 성공")
-            return True
+            if d(text="주문현황").exists:
+                ensure_general_tab(d, force_click=True)
+                time.sleep(0.4)
+                print(f"✅ [enter_order_status] fallback 주문현황 진입 성공: ({int(x)}, {int(y)})")
+                return True
 
         print("❌ [enter_order_status] 주문현황 진입 실패")
         return False
@@ -2286,22 +2342,48 @@ def find_search_edittext(d):
 
 def trigger_search(d, edit_obj):
     """
-    ✅ 검색 실행을 확실히:
-    - 입력칸 '바깥쪽 오른쪽' (돋보기 아이콘 위치)을 클릭
-    - 그 다음 Enter도 1번 누름
+    ✅ 검색 실행 우선순위
+    1) '검색' 텍스트 버튼 직접 클릭
+    2) 검색 입력칸과 같은 줄의 오른쪽 끝 영역 클릭
+    3) Enter
     """
+    try:
+        if click_text_center(d, "검색", 0.05, 0.35):
+            time.sleep(0.35)
+            return True
+    except Exception:
+        pass
+
     try:
         w, h = d.window_size()
         b = edit_obj.info.get("bounds", {})
+        left = int(b.get("left", 0))
         right = int(b.get("right", 0))
         top = int(b.get("top", 0))
         bottom = int(b.get("bottom", 0))
         cy = (top + bottom) // 2
 
-        # ✅ 입력칸 내부가 아니라 '오른쪽 바깥'을 찍는다
-        x = min(w - 5, right + 25)
-        d.click(x, cy)
-        time.sleep(0.35)
+        candidate_points = [
+            (min(w - 8, right + max(20, int(w * 0.02))), cy),
+            (min(w - 8, right + max(36, int(w * 0.035))), cy),
+            (min(w - 8, right + max(52, int(w * 0.05))), cy),
+            (min(w - 8, right - max(18, int((right - left) * 0.08))), cy),
+        ]
+
+        tried = set()
+        for x, y in candidate_points:
+            key = (int(x), int(y))
+            if key in tried:
+                continue
+            tried.add(key)
+            d.click(int(x), int(y))
+            time.sleep(0.25)
+
+            try:
+                if d(text="조회중입니다").exists or d(textContains="조회중입니다").exists:
+                    return True
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -3104,34 +3186,39 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
         try:
             w, h = d.window_size()
             b = label_obj.info.get("bounds", {})
+            left = int(b.get("left", 0))
+            right = int(b.get("right", 0))
             top = int(b.get("top", 0))
             bottom = int(b.get("bottom", 0))
             cy = (top + bottom) // 2
 
-            candidate_points = [
-                (int(w * 0.95), cy),
-                (int(w * 0.92), cy),
-                (int(w * 0.89), cy),
-                (int(w * 0.85), cy),
-                (int(w * 0.80), cy),
+            candidate_points = []
+            tried = set()
+
+            x_candidates = [
+                right + max(70, int(w * 0.07)),
+                right + max(120, int(w * 0.11)),
+                right + max(170, int(w * 0.15)),
+                w - max(120, int(w * 0.12)),
+                w - max(80, int(w * 0.08)),
             ]
 
-            tried = set()
-            filtered_points = []
-            for x, y in candidate_points:
-                x = max(0, min(w - 10, int(x)))
-                y = max(0, min(h - 10, int(y)))
-                key = (x, y)
-                if key not in tried:
-                    filtered_points.append((x, y))
+            for x in x_candidates:
+                for dy in [0, -10, 10]:
+                    px = max(8, min(w - 8, int(x)))
+                    py = max(8, min(h - 8, int(cy + dy)))
+                    key = (px, py)
+                    if key in tried:
+                        continue
                     tried.add(key)
+                    candidate_points.append((px, py))
 
-            for x, y in filtered_points:
+            for x, y in candidate_points:
                 d.click(x, y)
-                time.sleep(1.8)
+                time.sleep(1.4)
 
                 if _has_sale_group_options_visible():
-                    print("✅ [ready_sign] 판매구분 옵션 펼치기 완료")
+                    print(f"✅ [ready_sign] 판매구분 옵션 펼치기 완료: ({x}, {y})")
                     return True
 
             return False
@@ -3821,19 +3908,34 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
             try:
                 w, h = d.window_size()
                 b = label_obj.info.get("bounds", {})
+                left = int(b.get("left", 0))
+                right = int(b.get("right", 0))
                 bottom = int(b.get("bottom", 0))
-                field_y = min(h - 20, bottom + max(55, int(h * 0.03)))
 
-                points = [
-                    (int(w * 0.50), field_y),
-                    (int(w * 0.82), field_y),
-                    (int(w * 0.65), field_y),
+                field_y = min(h - 20, bottom + max(52, int(h * 0.03)))
+                x_candidates = [
+                    max(20, (left + right) // 2),
+                    min(w - 20, right + max(80, int(w * 0.08))),
+                    min(w - 20, right + max(150, int(w * 0.14))),
+                    int(w * 0.82),
                 ]
 
-                for x, y in points:
-                    d.click(x, y)
-                    time.sleep(1.5)
-                    return True
+                tried = set()
+                for x in x_candidates:
+                    px = max(8, min(w - 8, int(x)))
+                    py = max(8, min(h - 8, int(field_y)))
+                    key = (px, py)
+                    if key in tried:
+                        continue
+                    tried.add(key)
+
+                    d.click(px, py)
+                    time.sleep(1.2)
+
+                    if d(text="추가").exists or d(textContains="결제 수단").exists or d(text="결제정보").exists:
+                        return True
+
+                return False
             except Exception:
                 pass
 
@@ -4059,13 +4161,34 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
             try:
                 w, h = d.window_size()
                 b = label_obj.info.get("bounds", {})
+                left = int(b.get("left", 0))
+                right = int(b.get("right", 0))
                 bottom = int(b.get("bottom", 0))
-                field_y = min(h - 20, bottom + max(50, int(h * 0.03)))
+                field_y = min(h - 20, bottom + max(48, int(h * 0.03)))
 
-                for x in [int(w * 0.50), int(w * 0.78), int(w * 0.90)]:
-                    d.click(x, field_y)
+                x_candidates = [
+                    max(20, (left + right) // 2),
+                    min(w - 20, right + max(70, int(w * 0.07))),
+                    min(w - 20, right + max(130, int(w * 0.12))),
+                    int(w * 0.78),
+                ]
+
+                tried = set()
+                for x in x_candidates:
+                    px = max(8, min(w - 8, int(x)))
+                    py = max(8, min(h - 8, int(field_y)))
+                    key = (px, py)
+                    if key in tried:
+                        continue
+                    tried.add(key)
+
+                    d.click(px, py)
                     time.sleep(1.0)
-                    return True
+
+                    if d(text="카드사 선택").exists or d(textContains="카드사 선택").exists or d(text="BC카드").exists:
+                        return True
+
+                return False
             except Exception:
                 pass
 
@@ -4523,19 +4646,34 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
             try:
                 w, h = d.window_size()
                 b = label_obj.info.get("bounds", {})
+                left = int(b.get("left", 0))
+                right = int(b.get("right", 0))
                 bottom = int(b.get("bottom", 0))
-                field_y = min(h - 20, bottom + max(55, int(h * 0.03)))
+                field_y = min(h - 20, bottom + max(52, int(h * 0.03)))
 
-                points = [
-                    (int(w * 0.50), field_y),
-                    (int(w * 0.82), field_y),
-                    (int(w * 0.65), field_y),
+                x_candidates = [
+                    max(20, (left + right) // 2),
+                    min(w - 20, right + max(70, int(w * 0.07))),
+                    min(w - 20, right + max(130, int(w * 0.12))),
+                    int(w * 0.82),
                 ]
 
-                for x, y in points:
-                    d.click(x, y)
-                    time.sleep(1.8)
-                    return True
+                tried = set()
+                for x in x_candidates:
+                    px = max(8, min(w - 8, int(x)))
+                    py = max(8, min(h - 8, int(field_y)))
+                    key = (px, py)
+                    if key in tried:
+                        continue
+                    tried.add(key)
+
+                    d.click(px, py)
+                    time.sleep(1.2)
+
+                    if d(text="은행선택").exists or d(textContains="은행선택").exists or d(textContains="뱅크").exists:
+                        return True
+
+                return False
             except Exception:
                 pass
 
@@ -5869,27 +6007,36 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
             top = int(b.get("top", 0))
             right = int(b.get("right", 0))
             bottom = int(b.get("bottom", 0))
+            cy = (top + bottom) // 2
 
-            card_y = min(h - 10, max(10, (top + bottom) // 2 + 26))
-            candidate_points = [
-                (int(w * 0.50), card_y),
-                (int(w * 0.38), card_y),
-                (int(w * 0.65), card_y),
-                (max(20, left + 120), card_y),
-                (max(20, right + 80), card_y),
+            candidate_points = []
+            tried = set()
+
+            x_candidates = [
+                max(20, (left + right) // 2),
+                min(w - 20, right + max(90, int(w * 0.09))),
+                min(w - 20, right + max(170, int(w * 0.15))),
+                int(w * 0.50),
+                int(w * 0.65),
             ]
 
-            tried = set()
-            filtered_points = []
-            for x, y in candidate_points:
-                x = max(5, min(w - 5, int(x)))
-                y = max(5, min(h - 5, int(y)))
-                key = (x, y)
-                if key not in tried:
-                    filtered_points.append((x, y))
-                    tried.add(key)
+            y_candidates = [
+                cy,
+                min(h - 8, cy + max(18, int((bottom - top) * 0.6))),
+                min(h - 8, cy + max(34, int((bottom - top) * 1.0))),
+            ]
 
-            for x, y in filtered_points:
+            for x in x_candidates:
+                for y in y_candidates:
+                    px = max(5, min(w - 5, int(x)))
+                    py = max(5, min(h - 5, int(y)))
+                    key = (px, py)
+                    if key in tried:
+                        continue
+                    tried.add(key)
+                    candidate_points.append((px, py))
+
+            for x, y in candidate_points:
                 d.click(x, y)
                 time.sleep(0.8)
 
@@ -6105,17 +6252,29 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
             try:
                 w, h = d.window_size()
                 b = label_obj.info.get("bounds", {})
+                left = int(b.get("left", 0))
+                right = int(b.get("right", 0))
                 bottom = int(b.get("bottom", 0))
-                field_y = min(h - 10, bottom + max(52, int(h * 0.03)))
+                field_y = min(h - 10, bottom + max(50, int(h * 0.03)))
 
-                candidate_points = [
-                    (int(w * 0.50), field_y),
-                    (int(w * 0.72), field_y),
-                    (int(w * 0.85), field_y),
+                x_candidates = [
+                    max(20, (left + right) // 2),
+                    min(w - 20, right + max(70, int(w * 0.07))),
+                    min(w - 20, right + max(130, int(w * 0.12))),
+                    int(w * 0.72),
+                    int(w * 0.85),
                 ]
 
-                for x, y in candidate_points:
-                    d.click(x, y)
+                tried = set()
+                for x in x_candidates:
+                    px = max(8, min(w - 8, int(x)))
+                    py = max(8, min(h - 8, int(field_y)))
+                    key = (px, py)
+                    if key in tried:
+                        continue
+                    tried.add(key)
+
+                    d.click(px, py)
                     time.sleep(1.0)
                     if _wait_install_place_category_sheet_ready(timeout_sec=1.5):
                         return True
@@ -6216,10 +6375,29 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
             try:
                 w, h = d.window_size()
                 b = label_obj.info.get("bounds", {})
+                left = int(b.get("left", 0))
+                right = int(b.get("right", 0))
                 bottom = int(b.get("bottom", 0))
-                field_y = min(h - 10, bottom + max(50, int(h * 0.03)))
-                for x in [int(w * 0.50), int(w * 0.74), int(w * 0.86)]:
-                    d.click(x, field_y)
+                field_y = min(h - 10, bottom + max(48, int(h * 0.03)))
+
+                x_candidates = [
+                    max(20, (left + right) // 2),
+                    min(w - 20, right + max(70, int(w * 0.07))),
+                    min(w - 20, right + max(130, int(w * 0.12))),
+                    int(w * 0.74),
+                    int(w * 0.86),
+                ]
+
+                tried = set()
+                for x in x_candidates:
+                    px = max(8, min(w - 8, int(x)))
+                    py = max(8, min(h - 8, int(field_y)))
+                    key = (px, py)
+                    if key in tried:
+                        continue
+                    tried.add(key)
+
+                    d.click(px, py)
                     time.sleep(1.0)
                     if d(textContains="방문 희망일시 선택").exists or d(text="선택완료").exists:
                         return True
@@ -6544,7 +6722,8 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
             if d(text="미입력").exists:
                 ok = click_text_center(d, "미입력", 0.45, 0.85)
                 time.sleep(1.0)
-                return ok
+                if ok:
+                    return True
         except Exception:
             pass
 
@@ -6561,10 +6740,29 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
             try:
                 w, h = d.window_size()
                 b = label_obj.info.get("bounds", {})
+                left = int(b.get("left", 0))
+                right = int(b.get("right", 0))
                 bottom = int(b.get("bottom", 0))
-                field_y = min(h - 10, bottom + max(50, int(h * 0.03)))
-                for x in [int(w * 0.50), int(w * 0.72), int(w * 0.86)]:
-                    d.click(x, field_y)
+                field_y = min(h - 10, bottom + max(48, int(h * 0.03)))
+
+                x_candidates = [
+                    max(20, (left + right) // 2),
+                    min(w - 20, right + max(70, int(w * 0.07))),
+                    min(w - 20, right + max(130, int(w * 0.12))),
+                    int(w * 0.72),
+                    int(w * 0.86),
+                ]
+
+                tried = set()
+                for x in x_candidates:
+                    px = max(8, min(w - 8, int(x)))
+                    py = max(8, min(h - 8, int(field_y)))
+                    key = (px, py)
+                    if key in tried:
+                        continue
+                    tried.add(key)
+
+                    d.click(px, py)
                     time.sleep(1.0)
                     if d(textContains="타사제품 반환여부").exists or d(text="입력완료").exists:
                         return True
