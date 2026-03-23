@@ -3807,13 +3807,183 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
         print(f"❌ [ready_sign] 프로모션 불일치: 모달={promotion_raw}")
         return False
 
-    def _verify_discount_and_amount_then_next(discount_raw: str, promotion_raw: str, amount_raw: str) -> bool:
+    def _verify_discount_and_amount_then_next(regulation_raw: str, discount_raw: str, promotion_raw: str, amount_raw: str) -> bool:
+        reg_norm_local = normalize_regulation_value(regulation_raw)
         target_discount = _normalize_discount_target(discount_raw)
         expected_amount_digits = _normalize_amount_digits(amount_raw)
         target_promotion = normalize_promotion_value(promotion_raw)
 
-        if not target_discount:
-            return _abort(f"전자서명 중단: 모달 할인 추출 실패 / 고객={job['name']} / 원본할인={discount_raw}")
+        def _click_compensation_promotion_row_under_prepass() -> bool:
+            items = _collect_visible_text_items(0.35, 0.95)
+
+            prepass_item = None
+            for it in items:
+                txt_norm = re.sub(r"\s+", "", str(it.get("text") or ""))
+                if txt_norm == "Pre-Pass":
+                    prepass_item = it
+                    break
+
+            if prepass_item is None:
+                print("❌ [ready_sign] 보상 프로모션행 탐색 실패: Pre-Pass 미검출")
+                return False
+
+            pre_left, pre_top, pre_right, pre_bottom = prepass_item["bounds"]
+            pre_cy = (pre_top + pre_bottom) // 2
+
+            candidate = None
+            candidate_gap = 10**9
+
+            skip_norms = {
+                "Pre-Pass",
+                "선납할인선택없음",
+                "선납할인2할인선택없음",
+                "정기결제할인",
+                "동시구매할인",
+                "결합할인",
+                "할인적용",
+                "금액계산",
+                "주문1",
+            }
+
+            for it in items:
+                raw_txt = str(it.get("text") or "").strip()
+                txt_norm = re.sub(r"\s+", "", raw_txt)
+                if not txt_norm:
+                    continue
+                if txt_norm in skip_norms:
+                    continue
+
+                left, top, right, bottom = it["bounds"]
+                cy = (top + bottom) // 2
+
+                if cy <= pre_cy:
+                    continue
+
+                if abs(left - pre_left) > 80:
+                    continue
+
+                gap = cy - pre_cy
+                if gap < candidate_gap:
+                    candidate_gap = gap
+                    candidate = it
+
+            if candidate is None:
+                print("❌ [ready_sign] 보상 프로모션행 탐색 실패: Pre-Pass 아래 후보 없음")
+                return False
+
+            left, top, right, bottom = candidate["bounds"]
+            cx = (left + right) // 2
+            cy = (top + bottom) // 2
+
+            d.click(cx, cy)
+            time.sleep(1.5)
+            print(f"✅ [ready_sign] 보상 프로모션 행 클릭: {candidate['text']}")
+            return True
+
+        def _wait_compensation_promotion_sheet_ready(timeout_sec: float = 6.0) -> bool:
+            end_at = time.time() + timeout_sec
+
+            while time.time() < end_at:
+                if is_unexpected_digital_sales_home(d):
+                    return False
+
+                try:
+                    has_title = d(text="프로모션 할인").exists or d(textContains="프로모션 할인").exists
+                except Exception:
+                    has_title = False
+
+                if has_title:
+                    print("✅ [ready_sign] 보상 프로모션 할인 시트 준비 완료")
+                    time.sleep(0.3)
+                    return True
+
+                time.sleep(0.25)
+
+            print("❌ [ready_sign] 보상 프로모션 할인 시트 준비 실패")
+            return False
+
+        def _compensation_promotion_sheet_has_target(target_promo: str) -> bool:
+            if not target_promo:
+                return False
+
+            merged_texts = []
+            seen = set()
+
+            items = _collect_visible_text_items(0.45, 0.98)
+            for it in items:
+                norm = normalize_promotion_value(it["text"])
+                if norm and norm not in seen:
+                    merged_texts.append(norm)
+                    seen.add(norm)
+
+            xml = ""
+            try:
+                xml = d.dump_hierarchy()
+            except Exception:
+                xml = ""
+
+            if xml:
+                try:
+                    xml_texts = re.findall(r'text="([^"]*)"', xml)
+                    for raw in xml_texts:
+                        norm = normalize_promotion_value(raw)
+                        if norm and norm not in seen:
+                            merged_texts.append(norm)
+                            seen.add(norm)
+                except Exception:
+                    pass
+
+                try:
+                    xml_descs = re.findall(r'content-desc="([^"]*)"', xml)
+                    for raw in xml_descs:
+                        norm = normalize_promotion_value(raw)
+                        if norm and norm not in seen:
+                            merged_texts.append(norm)
+                            seen.add(norm)
+                except Exception:
+                    pass
+
+            for t in merged_texts:
+                if target_promo == t or target_promo in t or t in target_promo:
+                    print(f"✅ [ready_sign] 보상 프로모션 일치 확인: {promotion_raw}")
+                    return True
+
+            print(f"❌ [ready_sign] 보상 프로모션 불일치: 모달={promotion_raw}")
+            return False
+
+        def _apply_compensation_promotion() -> bool:
+            if not _click_compensation_promotion_row_under_prepass():
+                return False
+
+            if not _wait_compensation_promotion_sheet_ready(timeout_sec=6.0):
+                return False
+
+            if not _compensation_promotion_sheet_has_target(target_promotion):
+                return False
+
+            clicked = False
+
+            try:
+                if d(text="프로모션 적용").exists:
+                    clicked = click_text_center(d, "프로모션 적용", 0.82, 0.99)
+            except Exception:
+                clicked = False
+
+            if not clicked:
+                try:
+                    if d(textContains="프로모션 적용").exists:
+                        d(textContains="프로모션 적용").click()
+                        clicked = True
+                except Exception:
+                    clicked = False
+
+            if not clicked:
+                print("❌ [ready_sign] 보상 프로모션 적용 버튼 클릭 실패")
+                return False
+
+            time.sleep(2.0)
+            print(f"✅ [ready_sign] 보상 프로모션 적용 완료: {promotion_raw}")
+            return True
 
         if not target_promotion:
             return _abort(f"전자서명 중단: 모달 프로모션 추출 실패 / 고객={job['name']} / 원본프로모션={promotion_raw}")
@@ -3821,42 +3991,79 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
         if not expected_amount_digits:
             return _abort(f"전자서명 중단: 모달 금액 추출 실패 / 고객={job['name']} / 원본금액={amount_raw}")
 
+        if reg_norm_local not in {"보상", "보상/후결합"} and not target_discount:
+            return _abort(f"전자서명 중단: 모달 할인 추출 실패 / 고객={job['name']} / 원본할인={discount_raw}")
+
         if not _wait_discount_page_ready(timeout_sec=12.0):
             return _abort(f"전자서명 중단: 할인정보 입력 화면 준비 실패 / 고객={job['name']}")
 
         found_discount = False
         found_promotion = False
         total_ok = False
+        compensation_apply_done = False
 
         for step in range(8):
             if is_unexpected_digital_sales_home(d):
                 return _abort(f"전자서명 중단: 할인정보 입력 단계 홈이탈 / 고객={job['name']}")
 
-            if not found_discount and _discount_page_has_target(target_discount):
-                found_discount = True
-                print(f"✅ [ready_sign] 할인 일치 확인: {target_discount}")
+            if reg_norm_local in {"보상", "보상/후결합"}:
+                if not compensation_apply_done:
+                    if not _apply_compensation_promotion():
+                        return _abort(
+                            f"전자서명 중단: 보상 프로모션 불일치 또는 적용 실패 / 고객={job['name']} / 모달프로모션={promotion_raw}"
+                        )
+                    compensation_apply_done = True
+                    found_promotion = True
+                    time.sleep(1.0)
+            else:
+                if not found_discount and _discount_page_has_target(target_discount):
+                    found_discount = True
+                    print(f"✅ [ready_sign] 할인 일치 확인: {target_discount}")
 
-            if not found_promotion and _promotion_page_has_target(target_promotion):
-                found_promotion = True
+                if not found_promotion and _promotion_page_has_target(target_promotion):
+                    found_promotion = True
 
             if _verify_total_amount_row(expected_amount_digits):
                 total_ok = True
 
-            if found_discount and found_promotion and total_ok:
-                if not d(text="다음").exists:
-                    return _abort(f"전자서명 중단: 할인정보 입력 페이지 다음 버튼 미검출 / 고객={job['name']}")
+            if reg_norm_local in {"보상", "보상/후결합"}:
+                if found_promotion and total_ok:
+                    if not d(text="다음").exists:
+                        return _abort(f"전자서명 중단: 할인정보 입력 페이지 다음 버튼 미검출 / 고객={job['name']}")
 
-                ok_click = click_text_center(d, "다음", 0.90, 0.99)
-                if not ok_click:
-                    return _abort(f"전자서명 중단: 할인정보 입력 페이지 다음 버튼 클릭 실패 / 고객={job['name']}")
+                    ok_click = click_text_center(d, "다음", 0.90, 0.99)
+                    if not ok_click:
+                        return _abort(f"전자서명 중단: 할인정보 입력 페이지 다음 버튼 클릭 실패 / 고객={job['name']}")
 
-                time.sleep(2.0)
-                print(f"✅ [ready_sign] 할인/프로모션/총금액 검증 완료 후 다음 클릭: {job['name']}")
-                return True
+                    time.sleep(2.0)
+                    print(f"✅ [ready_sign] 보상 프로모션/총금액 검증 완료 후 다음 클릭: {job['name']}")
+                    return True
+            else:
+                if found_discount and found_promotion and total_ok:
+                    if not d(text="다음").exists:
+                        return _abort(f"전자서명 중단: 할인정보 입력 페이지 다음 버튼 미검출 / 고객={job['name']}")
+
+                    ok_click = click_text_center(d, "다음", 0.90, 0.99)
+                    if not ok_click:
+                        return _abort(f"전자서명 중단: 할인정보 입력 페이지 다음 버튼 클릭 실패 / 고객={job['name']}")
+
+                    time.sleep(2.0)
+                    print(f"✅ [ready_sign] 할인/프로모션/총금액 검증 완료 후 다음 클릭: {job['name']}")
+                    return True
 
             if step < 7:
                 print(f"ℹ️ [ready_sign] 할인정보 하단 검증 스크롤 {step + 1}/7")
                 _scroll_discount_down_once()
+
+        if reg_norm_local in {"보상", "보상/후결합"}:
+            if not found_promotion:
+                return _abort(
+                    f"전자서명 중단: 보상 프로모션 불일치 / 고객={job['name']} / 모달프로모션={promotion_raw}"
+                )
+
+            return _abort(
+                f"전자서명 중단: 보상 건 총 금액 또는 수납0원 불일치 / 고객={job['name']} / 모달금액={amount_raw}"
+            )
 
         if not found_discount:
             return _abort(
@@ -7136,7 +7343,9 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
         if _wait_discount_page_ready(timeout_sec=3.0):
             print(f"✅ [ready_sign] 주문 이어서 하기 후 할인정보 입력 화면 진입 감지: {job['name']}")
 
-            if not discount_raw:
+            reg_norm_resume = normalize_regulation_value(job.get("regulation_raw") or "")
+
+            if reg_norm_resume not in {"보상", "보상/후결합"} and not discount_raw:
                 return _abort(f"전자서명 중단: 모달 할인 추출 실패 / 고객={job['name']}")
 
             if not promotion_raw:
@@ -7148,7 +7357,7 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
             if not account_raw:
                 return _abort(f"전자서명 중단: 모달 결제정보 추출 실패 / 고객={job['name']}")
 
-            if not _verify_discount_and_amount_then_next(discount_raw, promotion_raw, amount_raw):
+            if not _verify_discount_and_amount_then_next(job.get("regulation_raw") or "", discount_raw, promotion_raw, amount_raw):
                 return False
 
             if not _open_payment_method_and_click_add(account_raw):
@@ -7162,7 +7371,6 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
                 pickup_request_raw,
                 special_note_raw,
             )
-
         return None
     
     def _open_payment_method_and_click_add(account_raw: str) -> bool:
@@ -7545,18 +7753,20 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
         if not _select_manage_type(manage_raw):
             return False
 
-        if not _select_contract_period(contract_raw):
+        if not _select_rental_option():
             return False
 
-        if not _go_next_after_manage_contract_for_compensation(regulation_raw):
+        if not _select_manage_type(manage_raw):
+            return False
+
+        if not _select_contract_period(contract_raw):
             return False
 
         if not _click_add_product_and_go_discount():
             return False
 
-        if reg_norm not in {"보상", "보상/후결합"}:
-            if not _verify_discount_and_amount_then_next(discount_raw, promotion_raw, amount_raw):
-                return False
+        if not _verify_discount_and_amount_then_next(regulation_raw, discount_raw, promotion_raw, amount_raw):
+            return False
 
         if not _open_payment_method_and_click_add(account_raw):
             return False
@@ -7576,7 +7786,7 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
         notify_success(
             f"전자서명 결제정보/설치주소 단계 완료: {job['name']} / {job['phone11']} / 결제정보={account_raw} / 우편번호={zipcode} / 기본주소={address_basic} / 상세주소={address_detail}"
         )
-        print(f"✅ [ready_sign] 상품검색/색상/렌탈/관리/약정/보상추가다음/할인검증/결제정보추가/설치주소입력 완료: {job['name']}")
+        print(f"✅ [ready_sign] 상품검색/색상/렌탈/관리/약정/할인검증/결제정보추가/설치주소입력 완료: {job['name']}")
         return True
 
         if not _open_payment_method_and_click_add(account_raw):
