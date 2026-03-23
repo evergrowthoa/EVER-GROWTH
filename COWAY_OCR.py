@@ -3813,53 +3813,88 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
         expected_amount_digits = _normalize_amount_digits(amount_raw)
         target_promotion = normalize_promotion_value(promotion_raw)
 
-        def _click_compensation_promotion_row_under_prepass() -> bool:
-            items = _collect_visible_text_items(0.35, 0.95)
+        def _promo_match_score(target_promo: str, candidate_text: str) -> int:
+            target_norm = normalize_promotion_value(target_promo)
+            cand_norm = normalize_promotion_value(candidate_text)
 
-            prepass_item = None
+            if not target_norm or not cand_norm:
+                return 0
+
+            if cand_norm == target_norm:
+                return 100
+
+            if target_norm in cand_norm:
+                return 90
+
+            if cand_norm in target_norm:
+                return 80
+
+            return 0
+
+        def _find_prepass_anchor():
+            exact_items = _collect_text_bounds(d, text_exact="Pre-Pass", y_min_ratio=0.30, y_max_ratio=0.92)
+            if exact_items:
+                return exact_items[0]
+
+            contain_items = _collect_text_bounds(d, text_contains="Pre-Pass", y_min_ratio=0.30, y_max_ratio=0.92)
+            if contain_items:
+                return contain_items[0]
+
+            items = _collect_visible_text_items(0.30, 0.92)
             for it in items:
                 txt_norm = re.sub(r"\s+", "", str(it.get("text") or ""))
-                if txt_norm == "Pre-Pass":
-                    prepass_item = it
-                    break
+                if "Pre-Pass" in txt_norm:
+                    left, top, right, bottom = it["bounds"]
+                    return {
+                        "text": it["text"],
+                        "bounds": (left, top, right, bottom),
+                        "center": ((left + right) // 2, (top + bottom) // 2),
+                    }
 
-            if prepass_item is None:
+            return None
+
+        def _click_compensation_promotion_row_under_prepass() -> bool:
+            anchor = _find_prepass_anchor()
+            if anchor is None:
                 print("❌ [ready_sign] 보상 프로모션행 탐색 실패: Pre-Pass 미검출")
                 return False
 
-            pre_left, pre_top, pre_right, pre_bottom = prepass_item["bounds"]
+            pre_left, pre_top, pre_right, pre_bottom = anchor["bounds"]
             pre_cy = (pre_top + pre_bottom) // 2
+
+            items = _collect_visible_text_items(0.30, 0.95)
 
             candidate = None
             candidate_gap = 10**9
 
-            skip_norms = {
+            skip_contains = [
                 "Pre-Pass",
-                "선납할인선택없음",
-                "선납할인2할인선택없음",
                 "정기결제할인",
                 "동시구매할인",
                 "결합할인",
-                "할인적용",
+                "선납할인선택없음",
+                "선납할인2할인선택없음",
                 "금액계산",
                 "주문1",
-            }
+                "선택한상품",
+                "할인적용",
+            ]
 
             for it in items:
                 raw_txt = str(it.get("text") or "").strip()
                 txt_norm = re.sub(r"\s+", "", raw_txt)
                 if not txt_norm:
                     continue
-                if txt_norm in skip_norms:
+                if any(k in txt_norm for k in skip_contains):
                     continue
 
                 left, top, right, bottom = it["bounds"]
                 cy = (top + bottom) // 2
 
-                if cy <= pre_cy:
+                if cy <= pre_cy + 8:
                     continue
 
-                if abs(left - pre_left) > 80:
+                if abs(left - pre_left) > 140:
                     continue
 
                 gap = cy - pre_cy
@@ -3872,10 +3907,10 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
                 return False
 
             left, top, right, bottom = candidate["bounds"]
-            cx = (left + right) // 2
-            cy = (top + bottom) // 2
+            click_x = min(right - 10, max(left + 20, left + ((right - left) // 2)))
+            click_y = (top + bottom) // 2
 
-            d.click(cx, cy)
+            d.click(click_x, click_y)
             time.sleep(1.5)
             print(f"✅ [ready_sign] 보상 프로모션 행 클릭: {candidate['text']}")
             return True
@@ -3902,54 +3937,34 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
             print("❌ [ready_sign] 보상 프로모션 할인 시트 준비 실패")
             return False
 
-        def _compensation_promotion_sheet_has_target(target_promo: str) -> bool:
-            if not target_promo:
+        def _choose_matching_compensation_promotion_option(target_promo: str) -> bool:
+            items = _collect_visible_text_items(0.45, 0.98)
+
+            best_item = None
+            best_score = 0
+
+            for it in items:
+                txt = str(it.get("text") or "").strip()
+                if not txt:
+                    continue
+
+                score = _promo_match_score(target_promo, txt)
+                if score > best_score:
+                    best_score = score
+                    best_item = it
+
+            if best_item is None or best_score <= 0:
+                print(f"❌ [ready_sign] 보상 프로모션 선택 실패: 모달={promotion_raw}")
                 return False
 
-            merged_texts = []
-            seen = set()
+            left, top, right, bottom = best_item["bounds"]
+            click_x = max(left + 20, min(right - 30, left + ((right - left) // 2)))
+            click_y = (top + bottom) // 2
 
-            items = _collect_visible_text_items(0.45, 0.98)
-            for it in items:
-                norm = normalize_promotion_value(it["text"])
-                if norm and norm not in seen:
-                    merged_texts.append(norm)
-                    seen.add(norm)
-
-            xml = ""
-            try:
-                xml = d.dump_hierarchy()
-            except Exception:
-                xml = ""
-
-            if xml:
-                try:
-                    xml_texts = re.findall(r'text="([^"]*)"', xml)
-                    for raw in xml_texts:
-                        norm = normalize_promotion_value(raw)
-                        if norm and norm not in seen:
-                            merged_texts.append(norm)
-                            seen.add(norm)
-                except Exception:
-                    pass
-
-                try:
-                    xml_descs = re.findall(r'content-desc="([^"]*)"', xml)
-                    for raw in xml_descs:
-                        norm = normalize_promotion_value(raw)
-                        if norm and norm not in seen:
-                            merged_texts.append(norm)
-                            seen.add(norm)
-                except Exception:
-                    pass
-
-            for t in merged_texts:
-                if target_promo == t or target_promo in t or t in target_promo:
-                    print(f"✅ [ready_sign] 보상 프로모션 일치 확인: {promotion_raw}")
-                    return True
-
-            print(f"❌ [ready_sign] 보상 프로모션 불일치: 모달={promotion_raw}")
-            return False
+            d.click(click_x, click_y)
+            time.sleep(1.0)
+            print(f"✅ [ready_sign] 보상 프로모션 옵션 선택: {best_item['text']}")
+            return True
 
         def _apply_compensation_promotion() -> bool:
             if not _click_compensation_promotion_row_under_prepass():
@@ -3958,7 +3973,7 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
             if not _wait_compensation_promotion_sheet_ready(timeout_sec=6.0):
                 return False
 
-            if not _compensation_promotion_sheet_has_target(target_promotion):
+            if not _choose_matching_compensation_promotion_option(target_promotion):
                 return False
 
             clicked = False
