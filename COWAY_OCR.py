@@ -3650,6 +3650,62 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
 
         return has_total_label and has_receipt_zero and amount_match
 
+    def _go_next_after_manage_contract_for_compensation(regulation_raw: str) -> bool:
+        reg_norm_local = normalize_regulation_value(regulation_raw)
+        if reg_norm_local not in {"보상", "보상/후결합"}:
+            return True
+
+        print(f"ℹ️ [ready_sign] 보상 규정 추가 다음 이동 시작 / 규정={reg_norm_local}")
+
+        for attempt in range(4):
+            if is_unexpected_digital_sales_home(d):
+                return _abort(f"전자서명 중단: 보상 규정 추가 다음 이동 중 홈이탈 / 고객={job['name']}")
+
+            clicked = False
+
+            try:
+                if d(text="다음").exists:
+                    clicked = click_text_center(d, "다음", 0.82, 0.99)
+            except Exception:
+                clicked = False
+
+            if not clicked:
+                try:
+                    if d(textContains="다음").exists:
+                        d(textContains="다음").click()
+                        clicked = True
+                except Exception:
+                    clicked = False
+
+            if not clicked:
+                if attempt == 3:
+                    return _abort(f"전자서명 중단: 보상 규정 추가 다음 버튼 클릭 실패 / 고객={job['name']} / 규정={reg_norm_local}")
+                time.sleep(0.8)
+                continue
+
+            time.sleep(2.0)
+
+            if is_unexpected_digital_sales_home(d):
+                return _abort(f"전자서명 중단: 보상 규정 다음 클릭 후 홈이탈 / 고객={job['name']}")
+
+            try:
+                if d(text="상품 담기").exists:
+                    print(f"✅ [ready_sign] 보상 규정 추가 다음 이동 완료: {job['name']} / 규정={reg_norm_local}")
+                    return True
+            except Exception:
+                pass
+
+            try:
+                if d(text="할인정보 입력").exists:
+                    print(f"✅ [ready_sign] 보상 규정 추가 다음 이동 완료(할인 단계 직접 진입): {job['name']} / 규정={reg_norm_local}")
+                    return True
+            except Exception:
+                pass
+
+            time.sleep(0.8)
+
+        return _abort(f"전자서명 중단: 보상 규정 추가 다음 이동 후 화면 판정 실패 / 고객={job['name']} / 규정={reg_norm_local}")
+
     def _click_add_product_and_go_discount() -> bool:
         if not d(text="상품 담기").exists:
             return _abort(f"전자서명 중단: 상품 담기 버튼 미검출 / 고객={job['name']}")
@@ -7388,11 +7444,20 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
         if not contract_raw:
             return _abort(f"전자서명 중단: 모달 약정 추출 실패 / 고객={job['name']} / 모델={search_model}")
 
-        if not regulation_raw:
+        reg_norm = normalize_regulation_value(regulation_raw)
+
+        if not reg_norm:
             return _abort(f"전자서명 중단: 모달 규정 추출 실패 / 고객={job['name']} / 모델={search_model}")
 
-        if not discount_raw:
-            return _abort(f"전자서명 중단: 모달 할인 추출 실패 / 고객={job['name']} / 모델={search_model}")
+        if reg_norm not in ALLOWED_REGULATION_SET:
+            return _abort(f"전자서명 중단: 허용되지 않은 규정 / 고객={job['name']} / 모델={search_model} / 규정={regulation_raw}")
+
+        print(f"🔎 [ready_sign] 규정 판정: raw='{regulation_raw}' / norm='{reg_norm}' / 할인='{discount_raw}'")
+
+        if (reg_norm not in {"보상", "보상/후결합"}) and (not discount_raw):
+            return _abort(
+                f"전자서명 중단: 모달 할인 추출 실패 / 고객={job['name']} / 모델={search_model} / 규정raw={regulation_raw} / 규정norm={reg_norm}"
+            )
 
         if not promotion_raw:
             return _abort(f"전자서명 중단: 모달 프로모션 추출 실패 / 고객={job['name']} / 모델={search_model}")
@@ -7483,11 +7548,36 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
         if not _select_contract_period(contract_raw):
             return False
 
+        if not _go_next_after_manage_contract_for_compensation(regulation_raw):
+            return False
+
         if not _click_add_product_and_go_discount():
             return False
 
-        if not _verify_discount_and_amount_then_next(discount_raw, promotion_raw, amount_raw):
+        if reg_norm not in {"보상", "보상/후결합"}:
+            if not _verify_discount_and_amount_then_next(discount_raw, promotion_raw, amount_raw):
+                return False
+
+        if not _open_payment_method_and_click_add(account_raw):
             return False
+
+        if not _fill_install_info_address(
+            phone11,
+            zipcode,
+            address_basic,
+            address_detail,
+            pickup_request_raw,
+            special_note_raw,
+        ):
+            return False
+
+        SIGN_IN_PROGRESS = True
+        sign_started.add(job["phone11"])
+        notify_success(
+            f"전자서명 결제정보/설치주소 단계 완료: {job['name']} / {job['phone11']} / 결제정보={account_raw} / 우편번호={zipcode} / 기본주소={address_basic} / 상세주소={address_detail}"
+        )
+        print(f"✅ [ready_sign] 상품검색/색상/렌탈/관리/약정/보상추가다음/할인검증/결제정보추가/설치주소입력 완료: {job['name']}")
+        return True
 
         if not _open_payment_method_and_click_add(account_raw):
             return False
@@ -7966,7 +8056,7 @@ while True:
 
         sync_runtime_state_from_db()
         time.sleep(1.2)
-
+#TEST
     except Exception as e:
         print("에러 발생:", e)
         traceback.print_exc()
