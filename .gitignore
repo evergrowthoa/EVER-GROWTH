@@ -18,4 +18,4 @@ __pycache__/
 .env.local
 local_secrets.cmd
 local_secrets.ps1
-screenshots/
+screenshots/coway_jobs.sqlite3
