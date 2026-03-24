@@ -3019,51 +3019,103 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
             if "_" in query_norm:
                 model_keys.append(query_norm.split("_")[0])
 
-            tvs = d(className="android.widget.TextView")
-            cnt = tvs.count
+            candidates_map = {}
 
-            candidates = []
-            seen = set()
-
-            for i in range(cnt):
+            def _try_add_candidate(txt: str, bounds_tuple):
                 try:
-                    tv = tvs[i]
-                    info = tv.info or {}
-                    txt = str(info.get("text") or "").strip()
+                    txt = str(txt or "").strip()
                     if not txt:
-                        continue
+                        return
 
                     if "," not in txt:
-                        continue
+                        return
 
                     txt_norm = re.sub(r"\s+", "", txt).upper()
                     if not any(k and k in txt_norm for k in model_keys):
-                        continue
+                        return
 
-                    b = info.get("bounds", {})
-                    left = int(b.get("left", 0))
-                    top = int(b.get("top", 0))
-                    right = int(b.get("right", 0))
-                    bottom = int(b.get("bottom", 0))
-
+                    left, top, right, bottom = bounds_tuple
                     if top < int(h * 0.18) or bottom > int(h * 0.92):
-                        continue
-
-                    if txt in seen:
-                        continue
-                    seen.add(txt)
+                        return
 
                     parts = [p.strip() for p in txt.split(",")]
                     color_text = parts[-1] if len(parts) >= 3 else txt
 
-                    candidates.append({
-                        "text": txt,
-                        "color_text": color_text,
-                        "obj": tv,
-                        "bounds": (left, top, right, bottom),
-                    })
+                    if txt not in candidates_map:
+                        candidates_map[txt] = {
+                            "text": txt,
+                            "color_text": color_text,
+                            "obj": None,
+                            "bounds": (left, top, right, bottom),
+                        }
                 except Exception:
-                    continue
+                    return
+
+            for scan_round in range(5):
+                try:
+                    tvs = d(className="android.widget.TextView")
+                    try:
+                        cnt = tvs.count
+                    except Exception:
+                        cnt = 0
+
+                    for i in range(cnt):
+                        try:
+                            tv = tvs[i]
+                            info = tv.info or {}
+                            txt = str(info.get("text") or "").strip()
+                            if not txt:
+                                continue
+
+                            b = info.get("bounds", {})
+                            left = int(b.get("left", 0))
+                            top = int(b.get("top", 0))
+                            right = int(b.get("right", 0))
+                            bottom = int(b.get("bottom", 0))
+
+                            if txt not in candidates_map and "," in txt:
+                                txt_norm = re.sub(r"\s+", "", txt).upper()
+                                if any(k and k in txt_norm for k in model_keys):
+                                    parts = [p.strip() for p in txt.split(",")]
+                                    color_text = parts[-1] if len(parts) >= 3 else txt
+
+                                    if top >= int(h * 0.18) and bottom <= int(h * 0.92):
+                                        candidates_map[txt] = {
+                                            "text": txt,
+                                            "color_text": color_text,
+                                            "obj": tv,
+                                            "bounds": (left, top, right, bottom),
+                                        }
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+
+                try:
+                    xml = d.dump_hierarchy()
+                except Exception:
+                    xml = ""
+
+                if xml:
+                    try:
+                        pattern = r'text="([^"]*CHPI-[^"]*?,[^"]*?)".*?bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"'
+                        for m in re.finditer(pattern, xml):
+                            txt = str(m.group(1) or "").strip()
+                            left = int(m.group(2))
+                            top = int(m.group(3))
+                            right = int(m.group(4))
+                            bottom = int(m.group(5))
+                            _try_add_candidate(txt, (left, top, right, bottom))
+                    except Exception:
+                        pass
+
+                if len(candidates_map) >= 2:
+                    time.sleep(0.25)
+                else:
+                    time.sleep(0.50)
+
+            candidates = list(candidates_map.values())
+            candidates.sort(key=lambda x: (x["bounds"][1], x["bounds"][0]))
 
             print(f"✅ [ready_sign] 상품후보 수집: {len(candidates)}개")
             for c in candidates:
