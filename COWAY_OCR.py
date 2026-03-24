@@ -7147,6 +7147,284 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
         print("❌ [ready_sign] 설치환경정보 화면 준비 실패")
         return False
 
+    def _click_field_text_or_label(field_text_candidates, label_candidates, y_min_ratio: float = 0.15, y_max_ratio: float = 0.92) -> bool:
+        for txt in field_text_candidates:
+            try:
+                if d(text=txt).exists:
+                    if click_text_center(d, txt, y_min_ratio, y_max_ratio):
+                        time.sleep(0.8)
+                        return True
+            except Exception:
+                pass
+
+            try:
+                if d(textContains=txt).exists:
+                    d(textContains=txt).click()
+                    time.sleep(0.8)
+                    return True
+            except Exception:
+                pass
+
+        label_obj = _find_first_label_obj(label_candidates)
+        if label_obj is None:
+            return False
+
+        try:
+            w, h = d.window_size()
+            b = label_obj.info.get("bounds", {})
+            right = int(b.get("right", 0))
+            top = int(b.get("top", 0))
+            bottom = int(b.get("bottom", 0))
+            cy = (top + bottom) // 2
+
+            x_candidates = [
+                min(w - 20, right + max(90, int(w * 0.08))),
+                min(w - 20, right + max(170, int(w * 0.14))),
+                int(w * 0.78),
+                int(w * 0.88),
+            ]
+
+            tried = set()
+            for x in x_candidates:
+                px = max(8, min(w - 8, int(x)))
+                py = max(8, min(h - 8, int(cy)))
+                key = (px, py)
+                if key in tried:
+                    continue
+                tried.add(key)
+
+                d.click(px, py)
+                time.sleep(0.8)
+                return True
+        except Exception:
+            pass
+
+        return False
+
+    def _wait_option_sheet_ready(title_keywords, option_keywords=None, timeout_sec: float = 5.0) -> bool:
+        end_at = time.time() + timeout_sec
+        option_keywords = option_keywords or []
+
+        while time.time() < end_at:
+            try:
+                if is_unexpected_digital_sales_home(d):
+                    return False
+
+                has_title = False
+                for kw in title_keywords:
+                    try:
+                        if d(text=kw).exists or d(textContains=kw).exists:
+                            has_title = True
+                            break
+                    except Exception:
+                        pass
+
+                has_option = True if not option_keywords else False
+                if option_keywords:
+                    for kw in option_keywords:
+                        try:
+                            if d(text=kw).exists or d(textContains=kw).exists:
+                                has_option = True
+                                break
+                        except Exception:
+                            pass
+
+                if has_title and has_option:
+                    time.sleep(0.25)
+                    return True
+            except Exception:
+                pass
+
+            time.sleep(0.25)
+
+        return False
+
+    def _click_option_from_bottom_sheet(target_text: str, fallback_text: str = "") -> bool:
+        def _score(target_raw: str, cand_raw: str) -> int:
+            target_norm = re.sub(r"\s+", "", str(target_raw or "")).strip()
+            cand_norm = re.sub(r"\s+", "", str(cand_raw or "")).strip()
+            if not target_norm or not cand_norm:
+                return 0
+            if cand_norm == target_norm:
+                return 100
+            if target_norm in cand_norm:
+                return 90
+            if cand_norm in target_norm:
+                return 80
+            return 0
+
+        items = _collect_visible_text_items(0.45, 0.98)
+
+        best_item = None
+        best_score = 0
+
+        for it in items:
+            txt = str(it.get("text") or "").strip()
+            if not txt:
+                continue
+
+            score = _score(target_text, txt)
+            if score > best_score:
+                best_score = score
+                best_item = it
+
+        if (best_item is None or best_score <= 0) and fallback_text:
+            for it in items:
+                txt = str(it.get("text") or "").strip()
+                if not txt:
+                    continue
+
+                score = _score(fallback_text, txt)
+                if score > best_score:
+                    best_score = score
+                    best_item = it
+
+        if best_item is None or best_score <= 0:
+            return False
+
+        left, top, right, bottom = best_item["bounds"]
+        cx = (left + right) // 2
+        cy = (top + bottom) // 2
+        d.click(cx, cy)
+        time.sleep(0.9)
+        return True
+
+    def _normalize_compensation_brand_target(raw_brand: str) -> str:
+        raw = str(raw_brand or "").strip()
+        raw_norm = re.sub(r"\s+", "", raw).upper()
+
+        if not raw_norm:
+            return ""
+
+        if "SK" in raw_norm or "에스케이" in raw or "매직" in raw:
+            return "SK"
+        if "LG" in raw_norm or "엘지" in raw or "엘지전자" in raw:
+            return "LG"
+        if "쿠쿠" in raw:
+            return "쿠쿠"
+        if "청호" in raw:
+            return "청호"
+        if "교원" in raw or "웰스" in raw:
+            return "교원"
+
+        return raw
+
+    def _normalize_install_mfg_year_month(raw_install_mfg: str):
+        raw = str(raw_install_mfg or "").strip()
+        raw = raw.replace("/", "-").replace(".", "-")
+        m = re.search(r"(\d{2,4})\D*(\d{1,2})", raw)
+
+        if not m:
+            return ("2020년 이전", "")
+
+        year_num = int(m.group(1))
+        month_num = int(m.group(2))
+
+        if year_num < 100:
+            year_num += 2000
+
+        if year_num <= 2020:
+            return ("2020년 이전", "")
+
+        if month_num < 1:
+            month_num = 1
+        if month_num > 12:
+            month_num = 12
+
+        return (f"{year_num}년", f"{month_num}월")
+
+    def _select_compensation_manufacturer(raw_brand: str) -> bool:
+        target_brand = _normalize_compensation_brand_target(raw_brand)
+        if not target_brand:
+            return _abort(f"전자서명 중단: 보상 제조사 값 없음 / 고객={job['name']} / 원본제조사={raw_brand}")
+
+        if not _click_field_text_or_label(["제조사 선택", target_brand], ["제조사"], 0.15, 0.70):
+            return _abort(f"전자서명 중단: 보상 제조사 선택창 열기 실패 / 고객={job['name']} / 원본제조사={raw_brand}")
+
+        if not _wait_option_sheet_ready(["제조사 선택"], ["SK", "LG", "쿠쿠", "청호", "교원", "기타"], timeout_sec=5.0):
+            return _abort(f"전자서명 중단: 보상 제조사 선택 시트 미검출 / 고객={job['name']}")
+
+        if not _click_option_from_bottom_sheet(target_brand, fallback_text="기타"):
+            return _abort(f"전자서명 중단: 보상 제조사 선택 실패 / 고객={job['name']} / 원본제조사={raw_brand}")
+
+        print(f"✅ [ready_sign] 보상 제조사 선택 완료: {target_brand}")
+        return True
+
+    def _select_compensation_year_month(raw_install_mfg: str) -> bool:
+        year_target, month_target = _normalize_install_mfg_year_month(raw_install_mfg)
+
+        if not _click_field_text_or_label(["년도", year_target], ["설치/제조 년월", "설치/제조년월", "설치 / 제조 년월"], 0.15, 0.72):
+            return _abort(f"전자서명 중단: 보상 설치/제조 년도 선택창 열기 실패 / 고객={job['name']} / 원본년월={raw_install_mfg}")
+
+        if not _wait_option_sheet_ready(["설치 / 제조 년 선택", "설치/제조 년 선택"], [year_target, "2020년 이전"], timeout_sec=5.0):
+            return _abort(f"전자서명 중단: 보상 설치/제조 년도 시트 미검출 / 고객={job['name']}")
+
+        if not _click_option_from_bottom_sheet(year_target, fallback_text="2020년 이전"):
+            return _abort(f"전자서명 중단: 보상 설치/제조 년도 선택 실패 / 고객={job['name']} / 원본년월={raw_install_mfg}")
+
+        print(f"✅ [ready_sign] 보상 설치/제조 년도 선택 완료: {year_target}")
+
+        if year_target == "2020년 이전":
+            return True
+
+        if not month_target:
+            return True
+
+        if not _click_field_text_or_label(["월", month_target], ["설치/제조 년월", "설치/제조년월", "설치 / 제조 년월"], 0.15, 0.72):
+            return _abort(f"전자서명 중단: 보상 설치/제조 월 선택창 열기 실패 / 고객={job['name']} / 원본년월={raw_install_mfg}")
+
+        if not _wait_option_sheet_ready(["설치 / 제조 월 선택", "설치/제조 월 선택"], [month_target], timeout_sec=5.0):
+            return _abort(f"전자서명 중단: 보상 설치/제조 월 시트 미검출 / 고객={job['name']}")
+
+        if not _click_option_from_bottom_sheet(month_target):
+            return _abort(f"전자서명 중단: 보상 설치/제조 월 선택 실패 / 고객={job['name']} / 원본년월={raw_install_mfg}")
+
+        print(f"✅ [ready_sign] 보상 설치/제조 월 선택 완료: {month_target}")
+        return True
+
+    def _select_compensation_simple_option(field_label: str, placeholder_text: str, target_text: str) -> bool:
+        target_text = str(target_text or "").strip()
+        if not target_text:
+            return _abort(f"전자서명 중단: 보상 {field_label} 값 없음 / 고객={job['name']}")
+
+        if not _click_field_text_or_label([placeholder_text, target_text], [field_label], 0.18, 0.85):
+            return _abort(f"전자서명 중단: 보상 {field_label} 선택창 열기 실패 / 고객={job['name']} / 목표={target_text}")
+
+        if not _wait_option_sheet_ready([f"{field_label} 선택"], [target_text], timeout_sec=5.0):
+            return _abort(f"전자서명 중단: 보상 {field_label} 선택 시트 미검출 / 고객={job['name']}")
+
+        if not _click_option_from_bottom_sheet(target_text):
+            return _abort(f"전자서명 중단: 보상 {field_label} 선택 실패 / 고객={job['name']} / 목표={target_text}")
+
+        print(f"✅ [ready_sign] 보상 {field_label} 선택 완료: {target_text}")
+        return True
+
+    def _fill_compensation_watermark(watermark_raw: str) -> bool:
+        watermark_digits = normalize_digits(watermark_raw or "")
+        if not watermark_digits:
+            return _abort(f"전자서명 중단: 보상 물마크 번호 없음 / 고객={job['name']}")
+
+        edit = _find_edittext_near_label(["물마크 번호", "물마크번호"], y_tolerance=90, y_below=180)
+        if edit is None:
+            return _abort(f"전자서명 중단: 보상 물마크 입력칸 미검출 / 고객={job['name']}")
+
+        current_digits = normalize_digits(_read_edit_obj_text(edit))
+        if current_digits == watermark_digits:
+            print(f"✅ [ready_sign] 보상 물마크 번호 이미 입력 일치: {watermark_digits}")
+            return True
+
+        if not type_into_edittext(d, edit, watermark_digits):
+            return _abort(f"전자서명 중단: 보상 물마크 번호 입력 실패 / 고객={job['name']} / 물마크={watermark_digits}")
+
+        time.sleep(0.6)
+
+        current_digits = normalize_digits(_read_edit_obj_text(edit))
+        if current_digits != watermark_digits:
+            return _abort(f"전자서명 중단: 보상 물마크 번호 입력값 불일치 / 고객={job['name']} / 기대={watermark_digits} / 현재={current_digits}")
+
+        print(f"✅ [ready_sign] 보상 물마크 번호 입력 완료: {watermark_digits}")
+        return True
+
     def _wait_multifacility_sheet_ready(timeout_sec: float = 5.0) -> bool:
         end_at = time.time() + timeout_sec
         while time.time() < end_at:
@@ -7163,12 +7441,29 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
         print("❌ [ready_sign] 다중시설 선택 시트 준비 실패")
         return False
 
-    def _fill_install_env_info(pickup_request_raw: str) -> bool:
-        if not _open_install_env_info():
-            return _abort(f"전자서명 중단: 설치환경정보 열기 실패 / 고객={job['name']}")
+    def _is_compensation_duplicate_watermark_popup_open() -> bool:
+        texts = _collect_popup_texts(0.18, 0.85)
+        joined = " ".join(texts)
+        joined_norm = re.sub(r"\s+", "", joined)
 
-        if not _wait_install_env_ready(timeout_sec=5.0):
-            return _abort(f"전자서명 중단: 설치환경정보 화면 미검출 / 고객={job['name']}")
+        if not joined_norm:
+            return False
+
+        if "이미접수된" in joined_norm and "물마크" in joined_norm:
+            return True
+
+        if "모니터링대상" in joined_norm and "물마크" in joined_norm:
+            return True
+
+        return False
+
+    def _fill_install_env_info(pickup_request_raw: str) -> bool:
+        if not _wait_install_env_ready(timeout_sec=1.5):
+            if not _open_install_env_info():
+                return _abort(f"전자서명 중단: 설치환경정보 열기 실패 / 고객={job['name']}")
+
+            if not _wait_install_env_ready(timeout_sec=5.0):
+                return _abort(f"전자서명 중단: 설치환경정보 화면 미검출 / 고객={job['name']}")
 
         if str(pickup_request_raw or "").strip():
             clicked_return = False
@@ -7192,6 +7487,25 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
 
             time.sleep(0.6)
             print("✅ [ready_sign] 타사제품 반환여부 선택 완료: 반환")
+
+        if is_compensation_regulation(regulation_raw):
+            if not _select_compensation_manufacturer(third_brand):
+                return False
+
+            if not _select_compensation_year_month(third_install_mfg):
+                return False
+
+            if not _select_compensation_simple_option("제품형태", "제품형태 선택", third_product_type):
+                return False
+
+            if not _select_compensation_simple_option("제품종류", "제품종류 선택", third_product_kind):
+                return False
+
+            if not _select_compensation_simple_option("설치형태", "설치형태 선택", third_install_shape):
+                return False
+
+            if not _fill_compensation_watermark(third_watermark_no):
+                return False
 
         opened_multi = False
         try:
@@ -7265,6 +7579,13 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
 
         time.sleep(1.2)
 
+        if is_compensation_regulation(regulation_raw):
+            if _is_compensation_duplicate_watermark_popup_open():
+                _click_cancel_if_exists()
+                return _abort(
+                    f"전자서명 중단: 이미 접수된 물마크 번호 팝업 감지 / 고객={job['name']} / 물마크번호={third_watermark_no}"
+                )
+
         if not _wait_install_info_ready(timeout_sec=6.0):
             return _abort(f"전자서명 중단: 설치환경정보 입력 후 설치정보 화면 복귀 실패 / 고객={job['name']}")
 
@@ -7307,6 +7628,12 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
         pickup_request_raw: str,
         special_note_raw: str,
     ) -> bool:
+        if is_compensation_regulation(regulation_raw):
+            if _wait_install_env_ready(timeout_sec=2.0):
+                print(f"✅ [ready_sign] 보상 설치환경정보 화면 선진입 감지: {job['name']}")
+                if not _fill_install_env_info(pickup_request_raw):
+                    return False
+
         if not _wait_install_info_ready(timeout_sec=12.0):
             return _abort(f"전자서명 중단: 설치정보 화면 진입 실패 / 고객={job['name']}")
 
@@ -7813,12 +8140,6 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
 
         if is_unexpected_digital_sales_home(d):
             return _abort(f"전자서명 중단: 상품 선택 후 홈이탈 / 고객={job['name']} / 모델={search_model}")
-
-        if not _select_rental_option():
-            return False
-
-        if not _select_manage_type(manage_raw):
-            return False
 
         if not _select_rental_option():
             return False
