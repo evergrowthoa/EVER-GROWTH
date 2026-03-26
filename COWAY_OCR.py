@@ -3568,6 +3568,137 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
             print("❌ [ready_sign] 화면 텍스트 수집 예외:", e)
             return []
 
+    def _extract_ba_remote_option_keyword(note_raw: str) -> str:
+        s = re.sub(r"\s+", "", str(note_raw or ""))
+        s = s.replace("[", "").replace("]", "")
+
+        if ("리모컨" not in s) and ("리모콘" not in s):
+            return ""
+
+        if "사각형" in s or "사각" in s:
+            return "사각형"
+        if "계단형" in s or "계단" in s:
+            return "계단형"
+        if "바형" in s:
+            return "바형"
+
+        return ""
+
+    def _click_text_item(item) -> bool:
+        try:
+            left, top, right, bottom = item["bounds"]
+            cx = (left + right) // 2
+            cy = (top + bottom) // 2
+            d.click(cx, cy)
+            time.sleep(1.0)
+            return True
+        except Exception:
+            return False
+
+    def _find_ba_option_item_by_keywords(keyword_list, y_min_ratio: float = 0.55, y_max_ratio: float = 0.95):
+        items = _collect_visible_text_items(y_min_ratio, y_max_ratio)
+
+        best_item = None
+        best_score = -1
+
+        for it in items:
+            raw_txt = str(it.get("text") or "").strip()
+            txt_norm = re.sub(r"\s+", "", raw_txt)
+            if not txt_norm:
+                continue
+
+            for kw in keyword_list:
+                kw_norm = re.sub(r"\s+", "", str(kw or ""))
+                if not kw_norm:
+                    continue
+
+                if txt_norm == kw_norm:
+                    score = 100
+                elif kw_norm in txt_norm:
+                    score = 90
+                elif txt_norm in kw_norm:
+                    score = 80
+                else:
+                    continue
+
+                if score > best_score:
+                    best_score = score
+                    best_item = it
+
+        return best_item
+
+    def _has_ba_option_section_visible() -> bool:
+        items = _collect_visible_text_items(0.55, 0.95)
+
+        for it in items:
+            txt_norm = re.sub(r"\s+", "", str(it.get("text") or ""))
+            if txt_norm == "선택1" or txt_norm.startswith("선택1"):
+                return True
+            if "일반도기" in txt_norm:
+                return True
+            if "작은도기" in txt_norm:
+                return True
+            if "리모콘" in txt_norm or "리모컨" in txt_norm:
+                return True
+
+        return False
+
+    def _handle_ba_model_extra_option_if_needed(model_query: str, special_note_raw: str) -> bool:
+        model_norm = re.sub(r"\s+", "", str(model_query or "")).upper()
+        if not model_norm.startswith("BA"):
+            return True
+
+        print(f"ℹ️ [ready_sign] BA 모델 추가선택 확인 시작: {model_query}")
+
+        for attempt in range(8):
+            if is_unexpected_digital_sales_home(d):
+                return _abort(f"전자서명 중단: BA 모델 추가선택 중 홈이탈 / 고객={job['name']} / 모델={model_query}")
+
+            toilet_item = _find_ba_option_item_by_keywords(["일반도기"])
+            if toilet_item is not None:
+                if not _click_text_item(toilet_item):
+                    return _abort(f"전자서명 중단: BA 일반도기 클릭 실패 / 고객={job['name']} / 모델={model_query}")
+
+                print(f"✅ [ready_sign] BA 일반도기 선택 완료: {job['name']} / 모델={model_query}")
+                return True
+
+            remote_anchor = _find_ba_option_item_by_keywords(["리모콘", "리모컨"])
+            if remote_anchor is not None:
+                remote_target = _extract_ba_remote_option_keyword(special_note_raw)
+                if not remote_target:
+                    return _abort(
+                        f"전자서명 중단: BA 리모컨 선택화면인데 메모에서 리모컨 정보 추출 실패 / 고객={job['name']} / 모델={model_query} / 메모={special_note_raw}"
+                    )
+
+                remote_item = _find_ba_option_item_by_keywords([remote_target])
+                if remote_item is None:
+                    return _abort(
+                        f"전자서명 중단: BA 리모컨 일치 옵션 없음 / 고객={job['name']} / 모델={model_query} / 메모={special_note_raw} / 목표={remote_target}"
+                    )
+
+                if not _click_text_item(remote_item):
+                    return _abort(
+                        f"전자서명 중단: BA 리모컨 옵션 클릭 실패 / 고객={job['name']} / 모델={model_query} / 목표={remote_target}"
+                    )
+
+                print(f"✅ [ready_sign] BA 리모컨 옵션 선택 완료: {job['name']} / 모델={model_query} / 목표={remote_target}")
+                return True
+
+            if not _has_ba_option_section_visible():
+                if attempt < 2:
+                    time.sleep(0.6)
+                    continue
+
+                print(f"ℹ️ [ready_sign] BA 모델 추가선택 없음 → 기본 흐름 진행: {model_query}")
+                return True
+
+            if attempt == 7:
+                return _abort(f"전자서명 중단: BA 모델 추가선택 화면 판정 실패 / 고객={job['name']} / 모델={model_query}")
+
+            time.sleep(0.6)
+
+        return True
+
     def _wait_discount_page_ready(timeout_sec: float = 12.0) -> bool:
         end_at = time.time() + timeout_sec
         stable_ok_count = 0
@@ -8148,6 +8279,9 @@ def try_open_ready_sign_detail(d, job: dict, entry_status: str = "인증완료")
             return False
 
         if not _select_contract_period(contract_raw):
+            return False
+
+        if not _handle_ba_model_extra_option_if_needed(search_model, special_note_raw):
             return False
 
         if not _click_add_product_and_go_discount():
