@@ -5,7 +5,7 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('numeric-haven-455700-k8-541f203927de.json', '.')],
+    datas=[('evergrowth-493504-abdee694f352.json', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

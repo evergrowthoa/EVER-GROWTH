@@ -19,7 +19,7 @@ def resource_path(relative_path: str) -> str:
     return os.path.join(base_path, relative_path)
 
 # 🔑 JSON 키 경로 (파일명 본인 것에 맞추세요)
-CREDENTIALS_FILE = resource_path('numeric-haven-455700-k8-541f203927de.json')
+CREDENTIALS_FILE = resource_path('evergrowth-493504-abdee694f352.json')
 
 # 🔗 구글 스프레드시트 URL
 SPREADSHEET_URL = 'https://docs.google.com/spreadsheets/d/17qWvyVONniRI758kESiYS680ChnF7RFHAX-iP-FbrVI/edit'
