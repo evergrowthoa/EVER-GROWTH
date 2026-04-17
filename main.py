@@ -35,7 +35,7 @@ def resource_path(relative_path: str) -> str:
     base_path = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base_path, relative_path)
 
-CREDENTIALS_FILE = resource_path('evergrowth-493504-abdee694f352.json')
+CREDENTIALS_FILE = resource_path('numeric-haven-455700-k8-541f203927de.json')
 SPREADSHEET_URL = 'https://docs.google.com/spreadsheets/d/17qWvyVONniRI758kESiYS680ChnF7RFHAX-iP-FbrVI/edit'
 
 yellow_fill = CellFormat(backgroundColor=Color(1, 1, 0))
@@ -283,13 +283,15 @@ def run_install_date_updater():
             rownum = idx + 2
 
             브랜드 = safe_strip(row.get("브랜드", ""))
-            진행상황 = normalize_date_yy_mm_dd(row.get("진행상황", ""))
-            예상설치일 = normalize_date_yy_mm_dd(row.get("예상설치일", ""))
-            상태원본 = safe_strip(row.get("진행상황", ""))
+            진행상황_원본 = safe_strip(row.get("진행상황", ""))
+            예상설치일_원본 = safe_strip(row.get("예상설치일", ""))
+            진행상황 = normalize_date_yy_mm_dd(진행상황_원본)
+            예상설치일 = normalize_date_yy_mm_dd(예상설치일_원본)
 
             if (
                 브랜드 == "코웨이"
-                and 상태원본 == "승인완료"
+                and 진행상황_원본 != ""
+                and 예상설치일_원본 != ""
                 and 진행상황 != 예상설치일
             ):
                 format_requests.append({
