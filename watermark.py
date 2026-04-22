@@ -36,9 +36,9 @@ TELEGRAM_CHAT_ID_ME = os.environ.get("TG_CHAT_ID_ME", "").strip()
 NOTIFY_PREFIX = "[디지털세일즈 Slack 조회]"
 
 POLL_INTERVAL_SEC = 3.0
-SEARCH_NAME = "정재경"
-DETAIL_EXPECT_NAME = "정재경"
-DETAIL_EXPECT_PHONE11 = "01043271050"
+SEARCH_NAME = "강동원"
+DETAIL_EXPECT_NAME = "강동원"
+DETAIL_EXPECT_PHONE11 = "01076222590"
 TARGET_STATUS_TEXT = "설치입력"
 
 DB_PATH = os.path.join(
@@ -1376,6 +1376,62 @@ def is_duplicate_watermark_popup_open(d) -> bool:
     return False
 
 
+def is_existing_install_info_popup_open(d) -> bool:
+    popup_fragments = [
+        "고객이 등록한 설치서 정보가 있습니다",
+        "고객이 등록한 설치서 정보가 있습니다.",
+        "해당 정보로 주문 및 설치를 진행하시겠습니까",
+        "해당 정보로 주문 및 설치를 진행하시겠습니까?",
+    ]
+
+    for frag in popup_fragments:
+        try:
+            if d(textContains=frag).exists:
+                return True
+        except Exception:
+            pass
+
+    return False
+
+
+def accept_existing_install_info_popup(d, timeout_sec: float = 4.0) -> bool:
+    end_at = time.time() + timeout_sec
+
+    while time.time() < end_at:
+        try:
+            if not is_existing_install_info_popup_open(d):
+                return False
+        except Exception:
+            pass
+
+        try:
+            if d(text="확인").exists:
+                d(text="확인").click()
+                time.sleep(1.0)
+                return True
+        except Exception:
+            pass
+
+        try:
+            if d(textContains="확인").exists:
+                d(textContains="확인").click()
+                time.sleep(1.0)
+                return True
+        except Exception:
+            pass
+
+        try:
+            if click_text_center(d, "확인", 0.45, 0.85):
+                time.sleep(1.0)
+                return True
+        except Exception:
+            pass
+
+        time.sleep(0.2)
+
+    return False
+
+
 def click_input_complete(d) -> bool:
     try:
         if d(text="입력완료").exists:
@@ -1553,7 +1609,15 @@ def process_one_job(d, job: dict):
             time.sleep(1.0)
             continue
 
-        time.sleep(2.0)
+        time.sleep(1.5)
+
+        if is_existing_install_info_popup_open(d):
+            print("📌 기존 설치지 정보 확인 팝업 감지 → 확인 클릭")
+            if not accept_existing_install_info_popup(d, timeout_sec=4.0):
+                last_reason = "기존 설치지 정보 확인 팝업 처리 실패"
+                time.sleep(1.0)
+                continue
+            time.sleep(1.0)
 
         if is_unexpected_digital_sales_home(d):
             last_reason = "주문 이어서 하기 후 홈화면 이탈"

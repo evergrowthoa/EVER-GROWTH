@@ -268,6 +268,7 @@ def run_install_date_updater():
         log_rows = []
 
         success_count = 0
+        status_skip_count = 0
         mismatch_count = 0
         fail_count = 0
 
@@ -322,6 +323,7 @@ def run_install_date_updater():
 
             status2 = str(match_row.get("상태", "")).replace(" ", "")
             if "순주문확정" not in status2 and "설치확정" not in status2:
+                format_requests.append(row_color_request(ws1.id, rownum, total_cols, 1, 0.85, 0.6))
                 log_rows.append([
                     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     customer_name,
@@ -329,6 +331,7 @@ def run_install_date_updater():
                     "설치확정 상태 제외",
                     f"시트2 상태={status2}"
                 ])
+                status_skip_count += 1
                 continue
 
             raw_date = str(match_row.get("설치예정일", "")).strip()
@@ -390,6 +393,7 @@ def run_install_date_updater():
             "완료",
             "설치일 처리 완료\n"
             f"✔ 입력 완료: {success_count}건\n"
+            f"⚠ 상태 미도달(행 전체 주황): {status_skip_count}건\n"
             f"⚠ 날짜 불일치(행 전체 핑크): {mismatch_count}건\n"
             f"❌ 미매칭(행 전체 노란색): {fail_count}건"
         )
@@ -434,4 +438,4 @@ if __name__ == "__main__":
 # git pull origin main
 
 # EXE파일 만드는 bash
-# pyinstaller --onefile --noconsole --add-data "numeric-haven-455700-k8-541f203927de.json;." main.py
+# pyinstaller --onefile --noconsole --icon=icon.ico --add-data "numeric-haven-455700-k8-541f203927de.json;." main.py
