@@ -17,7 +17,7 @@ import json
 import urllib.request
 import urllib.error
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
 
 import uiautomator2 as u2
 
@@ -800,6 +800,37 @@ def db_soft_delete_job(phone11: str):
     with jobs_lock:
         auth_sent_jobs.pop(phone11, None)
 
+def db_hard_delete_job(phone11: str):
+    if not phone11:
+        return
+
+    with db_lock:
+        conn = _db_conn()
+        try:
+            conn.execute("DELETE FROM jobs WHERE phone11 = ?", (phone11,))
+            conn.commit()
+        finally:
+            conn.close()
+
+    try:
+        queued_new_phones.discard(phone11)
+    except Exception:
+        pass
+
+    try:
+        processed_phones.discard(phone11)
+    except Exception:
+        pass
+
+    try:
+        sign_started.discard(phone11)
+    except Exception:
+        pass
+
+    with jobs_lock:
+        auth_sent_jobs.pop(phone11, None)
+
+
 def db_resume_job(phone11: str):
     row = db_get_job(phone11)
     if row is None:
@@ -889,9 +920,10 @@ def start_record_window_thread():
         top = ttk.Frame(root, padding=8)
         top.pack(side="top", fill="both", expand=True)
 
-        cols = ("name", "phone11", "status", "last_status", "last_error", "note", "updated_at")
+        cols = ("checked", "name", "phone11", "status", "last_status", "last_error", "note", "updated_at")
         tree = ttk.Treeview(top, columns=cols, show="headings", height=20)
 
+        tree.heading("checked", text="선택")
         tree.heading("name", text="고객명")
         tree.heading("phone11", text="연락처")
         tree.heading("status", text="현재 상태")
@@ -900,6 +932,7 @@ def start_record_window_thread():
         tree.heading("note", text="메모")
         tree.heading("updated_at", text="수정시각")
 
+        tree.column("checked", width=48, anchor="center")
         tree.column("name", width=110, anchor="center")
         tree.column("phone11", width=120, anchor="center")
         tree.column("status", width=90, anchor="center")
@@ -918,6 +951,7 @@ def start_record_window_thread():
         top.columnconfigure(0, weight=1)
 
         selected_phone = {"value": ""}
+        checked_phones = set()
 
         ttk.Label(ctrl, text="상태").grid(row=0, column=0, padx=4, pady=4, sticky="w")
         status_var = tk.StringVar(value=STATUS_NEW)
@@ -950,7 +984,11 @@ def start_record_window_thread():
 
             for row in rows:
                 iid = str(row.get("phone11") or "")
+                if not iid:
+                    continue
+
                 values = (
+                    "☑" if iid in checked_phones else "☐",
                     row.get("name") or "",
                     row.get("phone11") or "",
                     row.get("status") or "",
@@ -967,11 +1005,14 @@ def start_record_window_thread():
 
             for iid in existing_ids:
                 tree.delete(iid)
+                checked_phones.discard(iid)
 
             if current_phone and tree.exists(current_phone):
                 tree.selection_set(current_phone)
                 tree.focus(current_phone)
                 tree.see(current_phone)
+            elif current_phone:
+                selected_phone["value"] = ""
 
             root.after(2000, _refresh)
 
@@ -986,6 +1027,32 @@ def start_record_window_thread():
             status_var.set(row.get("status") or STATUS_NEW)
             note_entry.delete(0, "end")
             note_entry.insert(0, row.get("note") or "")
+
+        def _toggle_checked_from_event(event):
+            region = tree.identify_region(event.x, event.y)
+            column = tree.identify_column(event.x)
+            row_id = tree.identify_row(event.y)
+
+            if region != "cell" or column != "#1" or not row_id:
+                return
+
+            if row_id in checked_phones:
+                checked_phones.discard(row_id)
+                mark = "☐"
+            else:
+                checked_phones.add(row_id)
+                mark = "☑"
+
+            values = list(tree.item(row_id, "values"))
+            if values:
+                values[0] = mark
+                tree.item(row_id, values=values)
+
+            tree.selection_set(row_id)
+            tree.focus(row_id)
+            selected_phone["value"] = row_id
+            _load_selected()
+            return "break"
 
         def _save_note():
             phone11 = _selected_phone()
@@ -1026,14 +1093,35 @@ def start_record_window_thread():
             _load_selected()
 
         def _delete():
-            phone11 = _selected_phone()
-            if not phone11:
+            target_phones = [p for p in list(checked_phones) if tree.exists(p)]
+
+            if not target_phones:
+                messagebox.showwarning("삭제", "삭제할 기록을 먼저 체크하세요.")
                 return
-            db_set_note(phone11, note_entry.get().strip())
-            db_soft_delete_job(phone11)
+
+            ok = messagebox.askyesno(
+                "삭제 확인",
+                f"체크한 {len(target_phones)}건의 기록을 완전히 삭제할까요?\n삭제 후에는 복구할 수 없습니다."
+            )
+            if not ok:
+                return
+
+            for phone11 in target_phones:
+                db_hard_delete_job(phone11)
+                checked_phones.discard(phone11)
+                if tree.exists(phone11):
+                    tree.delete(phone11)
+
+            selected_phone["value"] = ""
+            note_entry.delete(0, "end")
+
+            try:
+                tree.selection_remove(tree.selection())
+            except Exception:
+                pass
+
             clear_stop()
             sync_runtime_state_from_db()
-            _load_selected()
 
         def _hold():
             phone11 = _selected_phone()
@@ -1074,6 +1162,7 @@ def start_record_window_thread():
         ttk.Button(ctrl, text="다음확인 즉시", command=_force_check).grid(row=0, column=11, padx=4, pady=4, sticky="ew")
 
         tree.bind("<<TreeviewSelect>>", _load_selected)
+        tree.bind("<Button-1>", _toggle_checked_from_event)
 
         _refresh()
         root.mainloop()

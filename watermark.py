@@ -408,6 +408,23 @@ def extract_watermark8(text: str) -> str:
     return m.group(1)
 
 
+def extract_reminder_watermark8(text: str) -> str:
+    s = str(text or "").strip()
+    if not s:
+        return ""
+
+    lower_s = s.lower()
+
+    if "리마인더" not in s and "reminder" not in lower_s:
+        return ""
+
+    m = re.search(r"물마크\s*(\d{8})", s)
+    if not m:
+        return ""
+
+    return m.group(1)
+
+
 def slack_resolve_user_name(slack_user_id: str) -> str:
     slack_user_id = str(slack_user_id or "").strip()
     if not slack_user_id:
@@ -496,12 +513,37 @@ def slack_poll_loop():
                 if db_has_seen_message(message_ts):
                     continue
 
-                if subtype:
-                    db_mark_seen_message(message_ts, raw_text, "")
-                    continue
+                reminder_watermark8 = ""
+                if subtype or bot_id:
+                    reminder_watermark8 = extract_reminder_watermark8(raw_text)
 
-                if bot_id:
-                    db_mark_seen_message(message_ts, raw_text, "")
+                    if not reminder_watermark8:
+                        db_mark_seen_message(message_ts, raw_text, "")
+                        continue
+
+                    watermark8 = reminder_watermark8
+                    db_mark_seen_message(message_ts, raw_text, watermark8)
+
+                    slack_user_name = "Slack 리마인더"
+
+                    print(
+                        f"📥 Slack 리마인더 조회요청 감지: ts={message_ts} / 물마크={watermark8}"
+                    )
+
+                    db_create_job(
+                        message_ts=message_ts,
+                        channel_id=SLACK_CHANNEL_ID,
+                        thread_ts=thread_ts,
+                        slack_user_id="",
+                        slack_user_name=slack_user_name,
+                        watermark8=watermark8,
+                    )
+
+                    row = db_get_job_by_message_ts(message_ts)
+                    if row:
+                        job_q.put(dict(row))
+                        notify_progress(f"Slack 리마인더 물마크 {watermark8}")
+
                     continue
 
                 watermark8 = extract_watermark8(raw_text)
@@ -1540,8 +1582,8 @@ def process_one_job(d, job: dict):
             time.sleep(1.0)
             continue
 
-        print("⏳ 주문현황 리스트 로딩 안정화 대기 5초")
-        time.sleep(5.0)
+        print("⏳ 주문현황 리스트 로딩 안정화 대기 9초")
+        time.sleep(9.0)
 
         edit = find_search_edittext(d)
         if edit is None:
