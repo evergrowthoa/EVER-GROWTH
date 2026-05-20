@@ -22,7 +22,7 @@ print("✅ BUILD:", BUILD_ID)
 # =========================
 # 기본 설정
 # =========================
-ADB_SERIAL = "emulator-5554"
+ADB_SERIAL = "127.0.0.1:5555"
 DIGITAL_SALES_APP_NAME = "디지털세일즈"
 DIGITAL_SALES_PACKAGE = ""
 
@@ -355,7 +355,7 @@ def db_list_recent_jobs(limit: int = 300):
             cur = conn.execute("""
                 SELECT *
                 FROM jobs
-                ORDER BY created_at DESC, id DESC
+                ORDER BY created_at ASC, id ASC
                 LIMIT ?
             """, (int(limit),))
             return [dict(r) for r in cur.fetchall()]
@@ -606,6 +606,31 @@ def connect_emulator():
     d.implicitly_wait(5.0)
     ADB_DEVICE = d
     return d
+
+
+def connect_emulator_with_retry(retry_sec: float = 5.0):
+    last_notify_at = 0.0
+
+    while True:
+        try:
+            if STOP_FLAG:
+                time.sleep(1.0)
+                continue
+
+            d = connect_emulator()
+            print("✅ 에뮬레이터 연결 완료:", ADB_SERIAL)
+            return d
+
+        except Exception as e:
+            msg = f"에뮬레이터 연결 대기중: {ADB_SERIAL} / {e}"
+            print("⚠️", msg)
+
+            now = time.time()
+            if now - last_notify_at >= 60:
+                notify(msg, level="warn")
+                last_notify_at = now
+
+            time.sleep(retry_sec)
 
 
 def click_text_center(d, txt: str, y_min_ratio: float = 0.0, y_max_ratio: float = 1.0) -> bool:
@@ -1855,6 +1880,7 @@ def start_log_window_thread():
             existing_ids = set(tree.get_children())
 
             db_ids = set()
+            display_index = 0
 
             for row in rows:
                 iid = str(row.get("message_ts") or row.get("id") or "")
@@ -1886,9 +1912,12 @@ def start_log_window_thread():
 
                 if iid in existing_ids:
                     tree.item(iid, values=values)
+                    tree.move(iid, "", display_index)
                     existing_ids.discard(iid)
                 else:
-                    tree.insert("", "end", iid=iid, values=values)
+                    tree.insert("", display_index, iid=iid, values=values)
+
+                display_index += 1
 
             for iid in existing_ids:
                 tree.delete(iid)
@@ -1918,8 +1947,7 @@ def preload_waiting_jobs():
 
 
 def emulator_worker_loop():
-    d = connect_emulator()
-    print("✅ 에뮬레이터 연결 완료:", ADB_SERIAL)
+    d = connect_emulator_with_retry(retry_sec=5.0)
 
     while True:
         try:
@@ -1954,6 +1982,11 @@ def emulator_worker_loop():
 
                 notify_error(f"작업 예외 / 물마크 {watermark8} / {e}")
 
+                try:
+                    d = connect_emulator_with_retry(retry_sec=5.0)
+                except Exception:
+                    pass
+
             finally:
                 try:
                     job_q.task_done()
@@ -1964,6 +1997,12 @@ def emulator_worker_loop():
             print("❌ 워커 루프 예외:", e)
             traceback.print_exc()
             notify_error(f"워커 루프 예외: {e}")
+
+            try:
+                d = connect_emulator_with_retry(retry_sec=5.0)
+            except Exception:
+                pass
+
             time.sleep(1.0)
 
 
