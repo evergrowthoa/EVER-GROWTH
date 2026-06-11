@@ -1322,7 +1322,7 @@ def _find_edittext_near_label(d, label_candidates, y_tolerance: int = 110, y_bel
     return best
 
 
-def select_bottom_sheet_option(d, option_text: str, timeout_sec: float = 6.0) -> bool:
+def select_bottom_sheet_option(d, option_text: str, timeout_sec: float = 7.0) -> bool:
     option_text = str(option_text or "").strip()
     if not option_text:
         return False
@@ -1335,30 +1335,42 @@ def select_bottom_sheet_option(d, option_text: str, timeout_sec: float = 6.0) ->
         except Exception:
             w, h = 0, 0
 
-        min_top = int(h * 0.42) if h else 0
+        min_top = int(h * 0.06) if h else 0
+        max_bottom = int(h * 0.995) if h else 99999
         seen = set()
 
         selector_list = []
 
         try:
-            selector_list.append(d(text=option_text))
+            selector_list.append(("exact", d(text=option_text)))
         except Exception:
             pass
 
         try:
-            selector_list.append(d(textContains=option_text))
+            selector_list.append(("contains", d(textContains=option_text)))
         except Exception:
             pass
 
-        for selector in selector_list:
+        for match_type, selector in selector_list:
             try:
                 cnt = selector.count
             except Exception:
                 cnt = 0
 
+            if cnt <= 0:
+                try:
+                    if selector.exists:
+                        cnt = 1
+                except Exception:
+                    cnt = 0
+
             for i in range(cnt):
                 try:
-                    obj = selector[i]
+                    if cnt == 1:
+                        obj = selector
+                    else:
+                        obj = selector[i]
+
                     info = obj.info or {}
                     b = info.get("bounds", {})
 
@@ -1373,7 +1385,16 @@ def select_bottom_sheet_option(d, option_text: str, timeout_sec: float = 6.0) ->
                     if top < min_top:
                         continue
 
-                    key = (left, top, right, bottom)
+                    if bottom > max_bottom:
+                        continue
+
+                    if right - left < 20:
+                        continue
+
+                    if bottom - top < 15:
+                        continue
+
+                    key = (left, top, right, bottom, match_type)
                     if key in seen:
                         continue
                     seen.add(key)
@@ -1382,6 +1403,7 @@ def select_bottom_sheet_option(d, option_text: str, timeout_sec: float = 6.0) ->
                     cy = (top + bottom) // 2
 
                     candidates.append({
+                        "match_type": match_type,
                         "left": left,
                         "top": top,
                         "right": right,
@@ -1392,23 +1414,99 @@ def select_bottom_sheet_option(d, option_text: str, timeout_sec: float = 6.0) ->
                 except Exception:
                     continue
 
-        candidates.sort(key=lambda x: x["top"], reverse=True)
+        candidates.sort(key=lambda x: (0 if x.get("match_type") == "exact" else 1, x["top"], x["left"]))
         return candidates
 
-    def _option_still_visible_in_bottom_sheet():
+    def _same_position_option_exists(before_cand):
+        try:
+            before_left = int(before_cand.get("left", 0))
+            before_top = int(before_cand.get("top", 0))
+            before_right = int(before_cand.get("right", 0))
+            before_bottom = int(before_cand.get("bottom", 0))
+        except Exception:
+            return False
+
+        for now_cand in _collect_option_candidates():
+            try:
+                now_left = int(now_cand.get("left", 0))
+                now_top = int(now_cand.get("top", 0))
+                now_right = int(now_cand.get("right", 0))
+                now_bottom = int(now_cand.get("bottom", 0))
+
+                if abs(now_left - before_left) <= 10 and abs(now_top - before_top) <= 10 and abs(now_right - before_right) <= 10 and abs(now_bottom - before_bottom) <= 10:
+                    return True
+            except Exception:
+                continue
+
+        return False
+
+    def _tap_option_row(cand):
         try:
             w, h = d.window_size()
         except Exception:
             w, h = 0, 0
 
-        bottom_sheet_min_top = int(h * 0.62) if h else 0
+        try:
+            left = int(cand.get("left", 0))
+            top = int(cand.get("top", 0))
+            right = int(cand.get("right", 0))
+            bottom = int(cand.get("bottom", 0))
+            cx = int(cand.get("cx", 0))
+            cy = int(cand.get("cy", 0))
+        except Exception:
+            return False
 
-        for cand in _collect_option_candidates():
+        click_points = []
+
+        if w > 0:
+            click_points.append((int(w * 0.50), cy))
+            click_points.append((int(w * 0.38), cy))
+            click_points.append((int(w * 0.62), cy))
+
+        click_points.append((cx, cy))
+        click_points.append((max(left + 24, cx - 120), cy))
+        click_points.append((min(right - 24, cx + 120), cy))
+
+        unique_points = []
+        seen_points = set()
+
+        for x, y in click_points:
             try:
-                if int(cand.get("top", 0)) >= bottom_sheet_min_top:
-                    return True
+                x = int(x)
+                y = int(y)
             except Exception:
                 continue
+
+            if w > 0:
+                x = max(5, min(w - 5, x))
+            if h > 0:
+                y = max(5, min(h - 5, y))
+
+            key = (x, y)
+            if key in seen_points:
+                continue
+
+            seen_points.add(key)
+            unique_points.append((x, y))
+
+        for x, y in unique_points:
+            try:
+                d.click(x, y)
+                time.sleep(0.45)
+
+                if not _same_position_option_exists(cand):
+                    return True
+            except Exception:
+                pass
+
+            try:
+                d.shell(f"input tap {x} {y}")
+                time.sleep(0.45)
+
+                if not _same_position_option_exists(cand):
+                    return True
+            except Exception:
+                pass
 
         return False
 
@@ -1423,23 +1521,64 @@ def select_bottom_sheet_option(d, option_text: str, timeout_sec: float = 6.0) ->
 
         for cand in candidates:
             try:
-                cx = int(cand.get("cx", 0))
-                cy = int(cand.get("cy", 0))
-
-                d.click(cx, cy)
-                time.sleep(0.9)
-
-                if not _option_still_visible_in_bottom_sheet():
+                if _tap_option_row(cand):
                     print(f"✅ 하단 선택창 옵션 선택 완료: {option_text}")
                     return True
 
-                print(f"⚠️ 하단 선택창 옵션 클릭 후에도 선택창 유지: {option_text}")
+                print(f"⚠️ 하단 선택창 옵션 클릭 후에도 같은 위치에 옵션 유지: {option_text}")
             except Exception:
                 continue
 
         time.sleep(0.2)
 
     print(f"❌ 하단 선택창 옵션 선택 실패: {option_text}")
+    return False
+
+
+def select_dropdown_value(d, field_text: str, option_text: str, y_min_ratio: float, y_max_ratio: float, retry_count: int = 3) -> bool:
+    field_text = str(field_text or "").strip()
+    option_text = str(option_text or "").strip()
+
+    if not field_text or not option_text:
+        return False
+
+    for attempt in range(1, retry_count + 1):
+        print(f"📌 선택 시도 {attempt}/{retry_count}: {field_text} → {option_text}")
+
+        try:
+            if d(text=option_text).exists and not d(text=field_text).exists:
+                print(f"✅ 이미 선택된 값으로 판단: {field_text} → {option_text}")
+                return True
+        except Exception:
+            pass
+
+        opened = click_text_if_exists(d, field_text, y_min_ratio, y_max_ratio)
+
+        if not opened:
+            try:
+                if d(text=option_text).exists or d(textContains=option_text).exists:
+                    opened = True
+            except Exception:
+                opened = False
+
+        if not opened:
+            print(f"❌ 선택창 열기 실패: {field_text}")
+            time.sleep(0.4)
+            continue
+
+        time.sleep(0.5)
+
+        if select_bottom_sheet_option(d, option_text, timeout_sec=7.0):
+            time.sleep(0.7)
+            return True
+
+        try:
+            d.press("back")
+            time.sleep(0.6)
+        except Exception:
+            pass
+
+    print(f"❌ 선택 최종 실패: {field_text} → {option_text}")
     return False
 
 
@@ -1480,45 +1619,28 @@ def choose_install_env_values(d, watermark8: str) -> bool:
     if not wait_install_env_ready(d, timeout_sec=8.0):
         return False
 
-    if not click_text_if_exists(d, "제조사 선택", 0.10, 0.45):
-        return False
-    if not select_bottom_sheet_option(d, "SK"):
+    if not select_dropdown_value(d, "제조사 선택", "SK", 0.10, 0.45, retry_count=3):
         return False
 
-    if not click_text_if_exists(d, "년도", 0.10, 0.45):
-        return False
-    if not select_bottom_sheet_option(d, "2025년"):
+    if not select_dropdown_value(d, "년도", "2025년", 0.10, 0.45, retry_count=3):
         return False
 
-    if not click_text_if_exists(d, "월", 0.10, 0.45):
-        return False
-    if not select_bottom_sheet_option(d, "1월"):
+    if not select_dropdown_value(d, "월", "1월", 0.10, 0.45, retry_count=3):
         return False
 
-    if not click_text_if_exists(d, "제품형태 선택", 0.10, 0.55):
-        return False
-    if not select_bottom_sheet_option(d, "데스크탑"):
+    if not select_dropdown_value(d, "제품형태 선택", "데스크탑", 0.10, 0.55, retry_count=3):
         return False
 
-    if not click_text_if_exists(d, "제품종류 선택", 0.10, 0.60):
-        return False
-    if not select_bottom_sheet_option(d, "얼음정수기"):
+    if not select_dropdown_value(d, "제품종류 선택", "얼음정수기", 0.10, 0.60, retry_count=4):
         return False
 
-    if not click_text_if_exists(d, "설치형태 선택", 0.10, 0.70):
-        return False
-    if not select_bottom_sheet_option(d, "직수형"):
+    if not select_dropdown_value(d, "설치형태 선택", "직수형", 0.10, 0.70, retry_count=3):
         return False
 
     if not fill_watermark_number(d, watermark8):
         return False
 
-    if not click_text_if_exists(d, "다중시설 선택", 0.40, 0.80):
-        return False
-    if not select_bottom_sheet_option(d, "대상 아님"):
-        return False
-
-    if not verify_install_env_values_before_submit(d, watermark8):
+    if not select_dropdown_value(d, "다중시설 선택", "대상 아님", 0.40, 0.85, retry_count=4):
         return False
 
     return True
