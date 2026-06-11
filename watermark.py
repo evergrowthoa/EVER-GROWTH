@@ -1323,27 +1323,123 @@ def _find_edittext_near_label(d, label_candidates, y_tolerance: int = 110, y_bel
 
 
 def select_bottom_sheet_option(d, option_text: str, timeout_sec: float = 6.0) -> bool:
+    option_text = str(option_text or "").strip()
+    if not option_text:
+        return False
+
+    def _collect_option_candidates():
+        candidates = []
+
+        try:
+            w, h = d.window_size()
+        except Exception:
+            w, h = 0, 0
+
+        min_top = int(h * 0.42) if h else 0
+        seen = set()
+
+        selector_list = []
+
+        try:
+            selector_list.append(d(text=option_text))
+        except Exception:
+            pass
+
+        try:
+            selector_list.append(d(textContains=option_text))
+        except Exception:
+            pass
+
+        for selector in selector_list:
+            try:
+                cnt = selector.count
+            except Exception:
+                cnt = 0
+
+            for i in range(cnt):
+                try:
+                    obj = selector[i]
+                    info = obj.info or {}
+                    b = info.get("bounds", {})
+
+                    left = int(b.get("left", 0))
+                    top = int(b.get("top", 0))
+                    right = int(b.get("right", 0))
+                    bottom = int(b.get("bottom", 0))
+
+                    if right <= left or bottom <= top:
+                        continue
+
+                    if top < min_top:
+                        continue
+
+                    key = (left, top, right, bottom)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+
+                    cx = (left + right) // 2
+                    cy = (top + bottom) // 2
+
+                    candidates.append({
+                        "left": left,
+                        "top": top,
+                        "right": right,
+                        "bottom": bottom,
+                        "cx": cx,
+                        "cy": cy,
+                    })
+                except Exception:
+                    continue
+
+        candidates.sort(key=lambda x: x["top"], reverse=True)
+        return candidates
+
+    def _option_still_visible_in_bottom_sheet():
+        try:
+            w, h = d.window_size()
+        except Exception:
+            w, h = 0, 0
+
+        bottom_sheet_min_top = int(h * 0.62) if h else 0
+
+        for cand in _collect_option_candidates():
+            try:
+                if int(cand.get("top", 0)) >= bottom_sheet_min_top:
+                    return True
+            except Exception:
+                continue
+
+        return False
+
     end_at = time.time() + timeout_sec
 
     while time.time() < end_at:
-        try:
-            if d(text=option_text).exists:
-                d(text=option_text).click()
-                time.sleep(0.8)
-                return True
-        except Exception:
-            pass
+        candidates = _collect_option_candidates()
 
-        try:
-            if d(textContains=option_text).exists:
-                d(textContains=option_text).click()
-                time.sleep(0.8)
-                return True
-        except Exception:
-            pass
+        if not candidates:
+            time.sleep(0.2)
+            continue
+
+        for cand in candidates:
+            try:
+                cx = int(cand.get("cx", 0))
+                cy = int(cand.get("cy", 0))
+
+                d.click(cx, cy)
+                time.sleep(0.9)
+
+                if not _option_still_visible_in_bottom_sheet():
+                    print(f"✅ 하단 선택창 옵션 선택 완료: {option_text}")
+                    return True
+
+                print(f"⚠️ 하단 선택창 옵션 클릭 후에도 선택창 유지: {option_text}")
+            except Exception:
+                continue
 
         time.sleep(0.2)
 
+    print(f"❌ 하단 선택창 옵션 선택 실패: {option_text}")
     return False
 
 
