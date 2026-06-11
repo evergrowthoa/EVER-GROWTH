@@ -1422,8 +1422,10 @@ def choose_install_env_values(d, watermark8: str) -> bool:
     if not select_bottom_sheet_option(d, "대상 아님"):
         return False
 
-    return True
+    if not verify_install_env_values_before_submit(d, watermark8):
+        return False
 
+    return True
 
 def is_duplicate_watermark_popup_open(d) -> bool:
     popup_fragments = [
@@ -1441,6 +1443,173 @@ def is_duplicate_watermark_popup_open(d) -> bool:
             pass
 
     return False
+
+
+def is_install_env_required_popup_open(d) -> bool:
+    popup_fragments = [
+        "설치환경정보를 입력해 주세요",
+        "설치환경정보를 입력해 주세요.",
+        "설치환경정보를 입력해주세요",
+        "설치환경정보를 입력해주세요.",
+    ]
+
+    for frag in popup_fragments:
+        try:
+            if d(textContains=frag).exists:
+                return True
+        except Exception:
+            pass
+
+    return False
+
+
+def close_confirm_popup(d, timeout_sec: float = 3.0) -> bool:
+    end_at = time.time() + timeout_sec
+
+    while time.time() < end_at:
+        try:
+            if d(text="확인").exists:
+                d(text="확인").click()
+                time.sleep(0.8)
+                return True
+        except Exception:
+            pass
+
+        try:
+            if d(textContains="확인").exists:
+                d(textContains="확인").click()
+                time.sleep(0.8)
+                return True
+        except Exception:
+            pass
+
+        try:
+            if click_text_center(d, "확인", 0.40, 0.90):
+                time.sleep(0.8)
+                return True
+        except Exception:
+            pass
+
+        time.sleep(0.2)
+
+    return False
+
+
+def is_install_env_submit_success_screen(d) -> bool:
+    try:
+        has_install_info_title = d(text="설치정보").exists or d(textContains="설치정보").exists
+        has_phone = d(text="휴대폰번호").exists or d(textContains="휴대폰번호").exists
+        has_address = d(text="주소").exists or d(textContains="주소").exists
+        has_env_label = d(text="설치환경정보").exists or d(textContains="설치환경정보").exists
+        has_done_value = d(text="입력완료").exists or d(textContains="입력완료").exists
+        has_order_button = d(text="주문 진행").exists or d(textContains="주문 진행").exists
+
+        if has_install_info_title and has_env_label and has_done_value and has_order_button and (has_phone or has_address):
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
+def wait_install_env_submit_result(d, timeout_sec: float = 8.0) -> str:
+    end_at = time.time() + timeout_sec
+
+    while time.time() < end_at:
+        try:
+            if is_duplicate_watermark_popup_open(d):
+                return "duplicate"
+
+            if is_install_env_required_popup_open(d):
+                return "required_popup"
+
+            if is_install_env_submit_success_screen(d):
+                return "success"
+
+            if is_unexpected_digital_sales_home(d):
+                return "home"
+        except Exception:
+            pass
+
+        time.sleep(0.25)
+
+    try:
+        if is_duplicate_watermark_popup_open(d):
+            return "duplicate"
+    except Exception:
+        pass
+
+    try:
+        if is_install_env_required_popup_open(d):
+            return "required_popup"
+    except Exception:
+        pass
+
+    try:
+        if is_install_env_submit_success_screen(d):
+            return "success"
+    except Exception:
+        pass
+
+    try:
+        still_env_screen = (
+            d(textContains="타사제품 반환여부").exists
+            or d(textContains="물마크 번호").exists
+            or d(textContains="수도와의 거리").exists
+        )
+        if still_env_screen:
+            return "still_env"
+    except Exception:
+        pass
+
+    return "timeout"
+
+
+def verify_install_env_values_before_submit(d, watermark8: str) -> bool:
+    required_texts = [
+        "미반환",
+        "SK",
+        "2025년",
+        "1월",
+        "데스크탑",
+        "얼음정수기",
+        "직수형",
+        "대상 아님",
+    ]
+
+    for txt in required_texts:
+        exists = False
+
+        try:
+            if d(text=txt).exists:
+                exists = True
+        except Exception:
+            pass
+
+        if not exists:
+            try:
+                if d(textContains=txt).exists:
+                    exists = True
+            except Exception:
+                pass
+
+        if not exists:
+            print(f"❌ 설치환경정보 필수값 검증 실패: {txt}")
+            return False
+
+    edit = _find_edittext_near_label(d, ["물마크 번호", "물마크번호"], y_tolerance=100, y_below=200)
+    if edit is None:
+        print("❌ 설치환경정보 필수값 검증 실패: 물마크 번호 입력칸 미검출")
+        return False
+
+    current_text = _read_edit_obj_text(edit)
+    current_digits = normalize_digits(current_text)
+
+    if current_digits != watermark8:
+        print(f"❌ 설치환경정보 필수값 검증 실패: 물마크 번호 불일치 / 입력값={current_digits} / 요청값={watermark8}")
+        return False
+
+    return True
 
 
 def is_existing_install_info_popup_open(d) -> bool:
@@ -1716,9 +1885,9 @@ def process_one_job(d, job: dict):
             time.sleep(1.0)
             continue
 
-        time.sleep(1.5)
+        submit_state = wait_install_env_submit_result(d, timeout_sec=8.0)
 
-        if is_duplicate_watermark_popup_open(d):
+        if submit_state == "duplicate":
             reply_text = f"물마크 {watermark8}\n물마크 중복입니다"
             mention = _mention_text()
             if mention:
@@ -1737,23 +1906,44 @@ def process_one_job(d, job: dict):
             _final_reset()
             return True
 
-        reply_text = f"물마크 {watermark8}\n물마크 사용가능"
-        mention = _mention_text()
-        if mention:
-            reply_text += f"\n{mention}"
+        if submit_state == "success":
+            reply_text = f"물마크 {watermark8}\n물마크 사용가능"
+            mention = _mention_text()
+            if mention:
+                reply_text += f"\n{mention}"
 
-        ok_sent = slack_send_result_text(
-            channel_id=channel_id,
-            thread_ts=thread_ts,
-            text=reply_text,
-        )
-        if ok_sent:
-            db_mark_job_replied(message_ts)
+            ok_sent = slack_send_result_text(
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                text=reply_text,
+            )
+            if ok_sent:
+                db_mark_job_replied(message_ts)
 
-        db_update_job_status(message_ts, "완료", "")
-        notify_success(f"물마크 {watermark8} / 물마크 사용가능")
-        _final_reset()
-        return True
+            db_update_job_status(message_ts, "완료", "")
+            notify_success(f"물마크 {watermark8} / 물마크 사용가능")
+            _final_reset()
+            return True
+
+        if submit_state == "required_popup":
+            close_confirm_popup(d, timeout_sec=3.0)
+            last_reason = "설치환경정보 필수값 누락 팝업 감지"
+            time.sleep(1.0)
+            continue
+
+        if submit_state == "still_env":
+            last_reason = "입력완료 후 설치환경정보 화면에 머물러 있음"
+            time.sleep(1.0)
+            continue
+
+        if submit_state == "home":
+            last_reason = "입력완료 후 홈화면 이탈"
+            time.sleep(1.0)
+            continue
+
+        last_reason = f"입력완료 후 결과화면 판별 실패: {submit_state}"
+        time.sleep(1.0)
+        continue
 
     return _send_final_error(last_reason or "재시도 후에도 처리 실패")
 

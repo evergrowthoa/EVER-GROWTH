@@ -23,10 +23,10 @@
 CPU 6zhdj RAM 12GB
 
 //////슬랙
-.\local_secrets.cmd << 이거 터미널 실행
+.\local_secrets.cmd   << 이거 터미널 실행
 
 ==============================================
-python COWAY_OCR.py
+.\local_secrets.cmdpython COWAY_OCR.py
 
 Git 사용자 설정 (최초 1회만)
 
