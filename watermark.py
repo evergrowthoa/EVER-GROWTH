@@ -36,6 +36,10 @@ TELEGRAM_CHAT_ID_ME = os.environ.get("TG_CHAT_ID_ME", "").strip()
 NOTIFY_PREFIX = "[디지털세일즈 Slack 조회]"
 
 POLL_INTERVAL_SEC = 3.0
+SLACK_API_TIMEOUT_SEC = 20
+SLACK_TIMEOUT_NOTIFY_COOLDOWN_SEC = 300
+SLACK_LAST_TIMEOUT_NOTIFY_AT = 0.0
+
 SEARCH_NAME = "강동원"
 DETAIL_EXPECT_NAME = "강동원"
 DETAIL_EXPECT_PHONE11 = "01076222590"
@@ -53,7 +57,7 @@ ADB_DEVICE = None
 job_q = queue.Queue()
 db_lock = threading.RLock()
 
-slack_client = WebClient(token=SLACK_BOT_TOKEN) if SLACK_BOT_TOKEN else None
+slack_client = WebClient(token=SLACK_BOT_TOKEN, timeout=SLACK_API_TIMEOUT_SEC) if SLACK_BOT_TOKEN else None
 SLACK_USER_NAME_CACHE = {}
 
 
@@ -469,8 +473,14 @@ def slack_reply_in_thread(channel_id: str, thread_ts: str, text: str):
             text=text,
         )
         return True
+    except (TimeoutError, urllib.error.URLError) as e:
+        print("⚠️ Slack 답장 네트워크 지연/타임아웃:", e)
+        return False
     except SlackApiError as e:
         print("⚠️ Slack 답장 실패:", e)
+        return False
+    except Exception as e:
+        print("⚠️ Slack 답장 예외:", e)
         return False
 
 
@@ -479,6 +489,8 @@ def slack_send_result_text(channel_id: str, thread_ts: str, text: str):
 
 
 def slack_poll_loop():
+    global SLACK_LAST_TIMEOUT_NOTIFY_AT
+
     if not slack_client or not SLACK_CHANNEL_ID:
         print("⚠️ Slack 설정 없음 → Slack polling 미실행")
         return
@@ -578,6 +590,21 @@ def slack_poll_loop():
                 if row:
                     job_q.put(dict(row))
                     notify_progress(f"Slack 물마크 {watermark8}")
+
+        except (TimeoutError, urllib.error.URLError) as e:
+            now = time.time()
+            msg = f"Slack API 응답 지연/타임아웃: {e}"
+
+            print("⚠️", msg)
+
+            if now - SLACK_LAST_TIMEOUT_NOTIFY_AT >= SLACK_TIMEOUT_NOTIFY_COOLDOWN_SEC:
+                notify(msg, level="warn")
+                SLACK_LAST_TIMEOUT_NOTIFY_AT = now
+
+        except SlackApiError as e:
+            print("❌ Slack API 오류:", e)
+            traceback.print_exc()
+            notify_error(f"Slack API 오류: {e}")
 
         except Exception as e:
             print("❌ Slack polling 예외:", e)
