@@ -592,14 +592,8 @@ def slack_poll_loop():
                     notify_progress(f"Slack 물마크 {watermark8}")
 
         except (TimeoutError, urllib.error.URLError) as e:
-            now = time.time()
             msg = f"Slack API 응답 지연/타임아웃: {e}"
-
             print("⚠️", msg)
-
-            if now - SLACK_LAST_TIMEOUT_NOTIFY_AT >= SLACK_TIMEOUT_NOTIFY_COOLDOWN_SEC:
-                notify(msg, level="warn")
-                SLACK_LAST_TIMEOUT_NOTIFY_AT = now
 
         except SlackApiError as e:
             print("❌ Slack API 오류:", e)
